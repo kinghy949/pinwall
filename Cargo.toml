@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# 原型为一次性验证代码，各自独立编译，不纳入工作区
+exclude = ["prototypes/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/kinghy949/pinwall"
+
+[workspace.dependencies]
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+thiserror = "2"
