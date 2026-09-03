@@ -141,27 +141,46 @@ egui / iced / slint 都还在快速迭代，API 会变。会有相当比例的�
 
 ## 未能验证（需补做）
 
-**5. 全屏应用之上的浮窗行为 —— 已人工验证，结果为否定。**
+**5. 全屏应用之上的浮窗行为 —— 已解决。**
 
-实测结论（2026-09-03，人工操作）：
+经四轮排查定位到根因并找到可行方案。
 
-> `level = Status(25)` + `collectionBehavior = CanJoinAllSpaces | FullScreenAuxiliary | Stationary`
-> + 默认 `Regular` 激活策略 —— **窗口无法覆盖其他应用的全屏窗口，切入全屏后即不可见。**
+### 排查过程
 
-这确认了 R5 是真实存在的问题，而非理论顾虑。**它是目前 MVP 最大的未解风险。**
+| 轮次 | 变量 | 结果 |
+|---|---|---|
+| 1a | winit NSWindow，level=Status(25)，cb=CanJoinAllSpaces\|FullScreenAuxiliary\|Stationary | 失败 |
+| 1b | 追加 level=101/1000/2³¹−17，追加 `Accessory` 激活策略，共 8 组 | 全部失败 |
+| 1b′ | 补上遗漏的 `orderFrontRegardless()`，加入 `isVisible`/`isOnActiveSpace` 探针 | 仍失败 |
+| 1b″ | 改用 `FullScreenNone`（cb=593）、`仅CanJoinAllSpaces`（cb=17），并打成 .app bundle 固化 `LSUIElement=1` | 仍失败 |
+| **1c** | **改用 `NSPanel` + `NonactivatingPanel` styleMask**，其余参数与失败轮次完全一致 | **通过** |
 
-值得注意的是：`FullScreenAuxiliary` 的语义是「允许窗口加入**其所属应用自己**的全屏 Space」，
-它未必适用于覆盖**他人**的全屏窗口。这可能正是失败原因。
+### 沿途排除的假设
 
-后续排查已改为参数矩阵自动轮播（见 `prototypes/pin-window`，每 4 秒切换一组，
-窗口内以黄色方块数量标示组合编号），追加验证三个此前未测的变量：
-1. 更高的窗口层级（PopUpMenu 101 / ScreenSaver 1000 / kCGMaximumWindowLevel）
-2. `NSApplicationActivationPolicy.Accessory`（无 Dock 图标，不强制切换 Space）—— **重点怀疑对象**
-3. 去掉 `FullScreenAuxiliary`、仅保留 `CanJoinAllSpaces`
+- **不是层级问题**：25 / 101 / 1000 / 2³¹−17 均正确写入并可读回，全部失败。
+- **不是 winit 覆盖了设置**：`collectionBehavior` 读回值（337 / 593 / 17）与设置完全一致。
+- **不是漏调 `orderFrontRegardless`**：补上后仍失败。
+- **不是激活策略**：运行时 `setActivationPolicy` 与 bundle 内 `LSUIElement=1` 两种方式均无效。
+- **不是 `FullScreenAuxiliary` 用错**：换成 `FullScreenNone` 及去掉全屏标志位，同样失败。
 
-排查结果待补。若全部组合均失败，则贴图在 macOS 上「覆盖他人全屏应用」这一场景可能需要
-完全不同的实现路径（如 CGShieldingWindowLevel、或接受该场景不支持），
-届时必须重新评估产品定位 —— 因为「盯着全屏的设计稿写代码」正是贴图的典型使用场景。
+关键诊断信号来自探针：全屏期间恒为 `isVisible=true` 且 `isOnActiveSpace=false` ——
+窗口活着，但从未进入全屏 Space。这把病因从「层级不够高」精确切换到了「Space 归属」。
+
+### 结论
+
+> **`NSWindow` 无论如何配置都无法进入他人全屏应用的 Space；
+> 必须使用 `NSPanel` 且 styleMask 含 `NonactivatingPanel`。**
+
+实测数据：NSPanel 方案连续 197 次采样，`isOnActiveSpace` 全程为 `true`，零次 `false`，
+覆盖全屏期间未中断。这是 Raycast / Alfred / CleanShot X 一类覆盖层工具的通行结构。
+
+**这不是 macOS 的系统限制，而是 winit 的窗口类型限制。** 代码见 `prototypes/pin-panel`。
+
+### 对架构的影响（已同步至技术选型）
+
+macOS 上贴图窗口与捕获遮罩**都不能用 winit 创建**（后者同样需要覆盖全屏应用才能截到图）。
+两者均须自行用 objc2 创建 NSPanel，再把 `CAMetalLayer` 挂到其 contentView 上供 wgpu 渲染。
+winit 在 macOS 上的作用因此大幅缩小，跨平台窗口抽象需要自己写。
 
 **6. 多显示器混合 DPI —— 未验证。** 测试机仅一块显示器，无法构造跨屏 DPI 变化场景。
 **此项需在双屏且两屏缩放不同的环境下补测。**
@@ -171,6 +190,9 @@ egui / iced / slint 都还在快速迭代，API 会变。会有相当比例的�
 
 ## 当前判断
 
-原型 1 的**技术可行性部分已通过**：Rust 能干净地拿到并操控原生窗口属性，渲染精度达标。
-但**风险 R5（全屏 Space 层级）尚未被证伪或证实**，它仍是 MVP 的首要未知项，
-在人工补测完成前，不应据此开始写产品代码。
+原型 1 的核心目标已达成：**R5 已从「最大未知风险」降级为「已知且有解的实现约束」。**
+
+代价是技术选型需要修订 —— macOS 上不能依赖 winit 建窗，跨平台窗口层要自己写（见技术选型文档）。
+这增加了工作量，但路径是明确的，不再有方向性的不确定。
+
+仍未验证：多显示器混合 DPI（R4，缺硬件）、Windows 侧全部行为。

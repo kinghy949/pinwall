@@ -42,9 +42,35 @@ Tauri 适合"用户主动打开、用完关掉"的应用。**PinWall 恰好相�
 
 - **语言：Rust** —— 无 GC 意味着没有 STW 停顿，热路径延迟可预测；内存占用可控；跨平台 FFI 生态成熟。
 
+### 窗口层（原型 1 后修订）
+
+> **修订说明**：原方案默认用 `winit` 统一建窗。原型 1 实测推翻了这一点。
+
+实测结论：**winit 创建的 `NSWindow` 无法进入他人全屏应用的 Space**，
+无论窗口层级与 `collectionBehavior` 如何配置均告失败；
+必须改用 `NSPanel` 且 styleMask 含 `NonactivatingPanel`（详见 [MVP 风险评估 R5](mvp-risks.md)）。
+
+这影响 macOS 上的**两类窗口**：
+
+| 窗口 | 为何必须覆盖全屏 | 结论 |
+|---|---|---|
+| 贴图浮窗 | 「盯着全屏设计稿写代码」是核心场景 | 手写 NSPanel |
+| 捕获遮罩 | 要截全屏应用的图，遮罩就得盖在它上面 | 手写 NSPanel |
+
+**因此 macOS 上不使用 winit 建窗。** 改为：
+
+1. 用 `objc2` 直接创建 `NSPanel`（`NonactivatingPanel | Borderless`，
+   level=1000，collectionBehavior=`CanJoinAllSpaces | Stationary | FullScreenAuxiliary | IgnoresCycle`）
+2. 在其 `contentView` 上挂 `CAMetalLayer`
+3. 由 wgpu 基于该 layer 创建 surface，egui 照常渲染其上
+
+**代价**：跨平台窗口抽象需要自己写一层（macOS 走 NSPanel，Windows 走 `WS_EX_LAYERED` + `HWND_TOPMOST`，
+Linux 走 X11）。winit 可能仍用于事件与显示器枚举，但不再负责建窗。这是原方案未预料到的工作量，需计入排期。
+
 ### GUI
 
 - **`egui` + `wgpu`** —— 立即模式 GUI，GPU 渲染，依赖极少，编译产物小，帧延迟低且稳定。选区遮罩本质上就是「一个十字光标 + 一个矩形 + 一排工具按钮」，这正是 egui 的最佳场景。
+  渲染目标改为上述自建 NSPanel 的 `CAMetalLayer`，egui 与 wgpu 本身的选型不受影响。
 - 备选 **`slint`**：声明式，视觉打磨上限更高（对标 CleanShot X 的精致度时更有余地），同样为低资源场景设计。
 - **建议策略**：热路径（选区遮罩）用 egui 保证延迟；如果后期发现标注编辑器/设置界面的视觉打磨受限于 egui，**只把冷路径换成 Slint**，热路径不动。
 
@@ -64,7 +90,7 @@ Tauri 适合"用户主动打开、用完关掉"的应用。**PinWall 恰好相�
 |---|---|---|
 | 全局快捷键 | `global-hotkey` | 跨三平台 |
 | 托盘 | `tray-icon` | 与上者同作者，配套好 |
-| 窗口 | `winit` | egui/wgpu 的标准搭配 |
+| 窗口 | **自建**（macOS: objc2+NSPanel / Windows: windows-rs） | winit 的 NSWindow 无法覆盖全屏，见上文 |
 | 图像处理 | `image` + `fast_image_resize` | 后者用 SIMD，缩放快一个数量级 |
 | PNG 编码 | `zune-png` / `oxipng` | 比默认编码器快，且压缩率更好 |
 | 异步运行时 | `tokio`（仅上传/OCR 用） | **不要**让它进热路径 |

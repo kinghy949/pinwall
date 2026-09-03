@@ -4,7 +4,8 @@
 
 | 原型 | 验证目标 | 状态 |
 |---|---|---|
-| [`pin-window`](pin-window/) | 贴图窗口的置顶行为与多屏 DPI | 进行中 |
+| [`pin-window`](pin-window/) | winit NSWindow 能否覆盖全屏 | **已完成 —— 结论为否** |
+| [`pin-panel`](pin-panel/) | NSPanel + NonactivatingPanel 能否覆盖全屏 | **已完成 —— 通过** |
 
 ## pin-window
 
@@ -33,3 +34,18 @@ cd prototypes/pin-window && cargo run
 ### 已有结论
 
 见 [`docs/mvp-risks.md`](../docs/mvp-risks.md) 的「原型 1 实测结论」一节。
+
+
+## pin-panel
+
+绕开 winit，直接用 objc2 创建 `NSPanel`。**这是最终采纳的方案。**
+
+```bash
+cd prototypes/pin-panel && cargo build --release
+# 需打成 .app bundle 并设 LSUIElement=1 后运行
+```
+
+实测：连续 197 次采样 `isOnActiveSpace` 全程为 `true`，覆盖他人全屏应用期间未中断。
+
+与 `pin-window` 的唯一差别是窗口类型（NSPanel vs NSWindow），
+level / collectionBehavior / bundle 配置完全一致 —— 这构成单变量对照。
