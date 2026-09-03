@@ -8,6 +8,8 @@
 | [`pin-panel`](pin-panel/) | NSPanel + NonactivatingPanel 能否覆盖全屏 | **已完成 —— 通过** |
 | [`annot-editor`](annot-editor/) | egui 矢量标注对象编辑 + 中文 IME | **已完成 —— 全部通过** |
 | [`hotpath`](hotpath/) | 热键 → 遮罩首帧延迟 | **已完成 —— 达标（0.11ms）** |
+| [`screens`](screens/) | 枚举显示器与 backingScaleFactor | 工具 |
+| [`multiscreen`](multiscreen/) | 多屏坐标、跨屏覆盖 | **已完成 —— 单窗口不能跨屏，须每屏一个** |
 
 ## pin-window
 
@@ -79,3 +81,14 @@ cd prototypes/hotpath && cargo build --release
 
 结论：预热 0.11ms / 冷建 0.96ms（中位），目标 50ms，达标。
 预热收益仅 0.86ms，不足以抵偿常驻内存代价，故取消预热。
+
+
+## multiscreen
+
+```bash
+cd prototypes/multiscreen && cargo build --release
+./MSProto.app/Contents/MacOS/multiscreen screen0|screen1|union|perscreen
+```
+
+- `union` —— 按所有屏并集建一个遮罩：**只覆盖一块屏，验证失败**
+- `perscreen` —— 每屏各建一个遮罩：**两屏均覆盖，为正确方案**
