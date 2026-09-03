@@ -9,30 +9,16 @@ use objc2::rc::Retained;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSGraphicsContext, NSImage, NSView};
 use objc2_core_graphics::CGContext;
-use objc2_app_kit::{
-    NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSStringDrawing,
-};
-use objc2_foundation::{
-    MainThreadMarker, NSDictionary, NSPoint, NSRect, NSSize, NSString,
-};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 
-use crate::{DrawCommand, PointerEvent, PointerHandler, Rgba};
+use super::annot_draw::{self, inset};
+use crate::{DrawCommand, PointerEvent, PointerHandler};
 
 /// 缩放范围。下限保证贴图不会小到点不中，上限避免无意义的糊放大。
 const ZOOM_MIN: f64 = 0.1;
 const ZOOM_MAX: f64 = 8.0;
 const OPACITY_MIN: f64 = 0.1;
 
-/// 矩形四边同时内缩。
-fn inset(r: NSRect, d: f64) -> NSRect {
-    NSRect::new(
-        NSPoint::new(r.origin.x + d, r.origin.y + d),
-        NSSize::new(
-            (r.size.width - d * 2.0).max(0.0),
-            (r.size.height - d * 2.0).max(0.0),
-        ),
-    )
-}
 
 pub struct PinViewIvars {
     pub image: RefCell<Option<Retained<NSImage>>>,
@@ -309,128 +295,18 @@ impl PinView {
 
     /// 绘制叠加的标注图元。
     ///
-    /// 指令坐标为贴图局部（左上角原点、y 向下），而 CG 上下文是
-    /// 左下角原点、y 向上，故每条指令都要翻转 y。
+    /// 实际画法在 [`annot_draw`]，与导出时共用同一份代码。此处只负责
+    /// 把「当前缩放」这一屏幕特有的信息喂进去：标注存在**图像原始坐标**
+    /// 中，随图像一起缩放，才不会在放大后漂移或显得过细。
     fn draw_commands(&self, bounds: NSRect) {
         let cmds = self.ivars().commands.borrow();
         if cmds.is_empty() {
             return;
         }
         let Some(nsctx) = NSGraphicsContext::currentContext() else { return };
-        let ctx = nsctx.CGContext();
-
-        // 标注坐标存于图像原始尺寸下，绘制时整体按缩放系数放大，
-        // 使线宽、字号也随之变化 —— 若只缩放坐标，放大后线条会显得过细。
         let z = self.ivars().zoom.get().max(f64::EPSILON);
-        CGContext::save_g_state(Some(&ctx));
-        CGContext::scale_ctm(Some(&ctx), z, z);
         // 翻转 y 时用的是**图像原始高度**，而非已缩放的视图高度
-        let h = bounds.size.height / z;
-        let fy = |y: f64| h - y;
-
-        for c in cmds.iter() {
-            match c {
-                DrawCommand::Rect { rect, color, width } => {
-                    set_stroke(&ctx, *color);
-                    CGContext::set_line_width(Some(&ctx), *width);
-                    CGContext::stroke_rect(
-                        Some(&ctx),
-                        NSRect::new(
-                            NSPoint::new(rect.origin.x, fy(rect.origin.y + rect.size.height)),
-                            NSSize::new(rect.size.width, rect.size.height),
-                        ),
-                    );
-                }
-                DrawCommand::Arrow { from, to, color, width } => {
-                    let (a, b) = (
-                        NSPoint::new(from.x, fy(from.y)),
-                        NSPoint::new(to.x, fy(to.y)),
-                    );
-                    set_stroke(&ctx, *color);
-                    CGContext::set_line_width(Some(&ctx), *width);
-                    CGContext::begin_path(Some(&ctx));
-                    CGContext::move_to_point(Some(&ctx), a.x, a.y);
-                    CGContext::add_line_to_point(Some(&ctx), b.x, b.y);
-                    CGContext::stroke_path(Some(&ctx));
-
-                    // 箭头头部：以线段方向为轴的等腰三角形
-                    let (dx, dy) = (b.x - a.x, b.y - a.y);
-                    let len = (dx * dx + dy * dy).sqrt();
-                    if len > f64::EPSILON {
-                        let (ux, uy) = (dx / len, dy / len);
-                        let (nx, ny) = (-uy, ux);
-                        let back = 8.0 + width * 2.0;
-                        let half = 4.0 + width;
-                        set_fill(&ctx, *color);
-                        CGContext::begin_path(Some(&ctx));
-                        CGContext::move_to_point(Some(&ctx), b.x, b.y);
-                        CGContext::add_line_to_point(
-                            Some(&ctx),
-                            b.x - ux * back + nx * half,
-                            b.y - uy * back + ny * half,
-                        );
-                        CGContext::add_line_to_point(
-                            Some(&ctx),
-                            b.x - ux * back - nx * half,
-                            b.y - uy * back - ny * half,
-                        );
-                        CGContext::close_path(Some(&ctx));
-                        CGContext::fill_path(Some(&ctx));
-                    }
-                }
-                DrawCommand::Redact { rect } => {
-                    // 以不透明纯色遮蔽。真正的马赛克需要读回底图像素，
-                    // 而纯色遮挡在防泄露上更彻底 —— 马赛克有被复原的先例。
-                    CGContext::set_rgb_fill_color(Some(&ctx), 0.12, 0.12, 0.12, 1.0);
-                    CGContext::fill_rect(
-                        Some(&ctx),
-                        NSRect::new(
-                            NSPoint::new(rect.origin.x, fy(rect.origin.y + rect.size.height)),
-                            NSSize::new(rect.size.width, rect.size.height),
-                        ),
-                    );
-                }
-                DrawCommand::SelectionBox { rect } => {
-                    let r = NSRect::new(
-                        NSPoint::new(rect.origin.x, fy(rect.origin.y + rect.size.height)),
-                        NSSize::new(rect.size.width, rect.size.height),
-                    );
-                    CGContext::set_rgb_stroke_color(Some(&ctx), 0.0, 0.48, 1.0, 1.0);
-                    CGContext::set_line_width(Some(&ctx), 1.0);
-                    CGContext::stroke_rect(Some(&ctx), inset(r, -3.0));
-                    // 两个角手柄，与模型中的 a / b 对应
-                    for (hx, hy) in [
-                        (r.origin.x, r.origin.y + r.size.height),
-                        (r.origin.x + r.size.width, r.origin.y),
-                    ] {
-                        let d = 3.5;
-                        let hr = NSRect::new(
-                            NSPoint::new(hx - d, hy - d),
-                            NSSize::new(d * 2.0, d * 2.0),
-                        );
-                        CGContext::set_rgb_fill_color(Some(&ctx), 0.0, 0.48, 1.0, 1.0);
-                        CGContext::fill_rect(Some(&ctx), hr);
-                        CGContext::set_rgb_stroke_color(Some(&ctx), 1.0, 1.0, 1.0, 1.0);
-                        CGContext::stroke_rect(Some(&ctx), hr);
-                    }
-                }
-                DrawCommand::Text { origin, text, color, size } => {
-                    let s = NSString::from_str(text);
-                    let font = NSFont::systemFontOfSize(*size);
-                    let fg = NSColor::colorWithSRGBRed_green_blue_alpha(
-                        color.r, color.g, color.b, color.a,
-                    );
-                    let attrs = NSDictionary::from_slices(
-                        &[unsafe { NSFontAttributeName }, unsafe { NSForegroundColorAttributeName }],
-                        &[&*font as &objc2::runtime::AnyObject, &*fg],
-                    );
-                    // NSString 绘制以左下角为基准，故用文字高度回退
-                    let point = NSPoint::new(origin.x, fy(origin.y) - size * 1.2);
-                    unsafe { s.drawAtPoint_withAttributes(point, Some(&attrs)) };
-                }
-            }
-        }
-        CGContext::restore_g_state(Some(&ctx));
+        annot_draw::draw(&nsctx.CGContext(), &cmds, bounds.size.height / z, z);
     }
 
     /// 描一圈双色细边。
@@ -460,12 +336,4 @@ impl PinView {
             w.orderOut(None);
         }
     }
-}
-
-fn set_stroke(ctx: &CGContext, c: Rgba) {
-    CGContext::set_rgb_stroke_color(Some(ctx), c.r, c.g, c.b, c.a);
-}
-
-fn set_fill(ctx: &CGContext, c: Rgba) {
-    CGContext::set_rgb_fill_color(Some(ctx), c.r, c.g, c.b, c.a);
 }

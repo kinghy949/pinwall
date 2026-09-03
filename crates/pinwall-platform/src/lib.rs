@@ -288,4 +288,4 @@ impl OverlaySet {
 }
 
 mod backend;
-pub use backend::{copy_image_to_clipboard, current_platform};
+pub use backend::{copy_image_to_clipboard, current_platform, flatten_annotations};

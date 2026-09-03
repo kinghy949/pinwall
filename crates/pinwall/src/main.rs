@@ -1,9 +1,10 @@
 //! PinWall —— 把截图钉在屏幕上。
 //!
-//! 当前实现的最小闭环：
+//! 当前实现的闭环：
 //!   全局热键 → 每屏遮罩 → 框选（可跨屏）→ 分屏捕获并拼接 → 贴为置顶浮窗
+//!   → 标注（工具栏 / 快捷键）→ 烧进像素后存盘或复制
 //!
-//! 尚未接入：标注编辑、历史库、上传工作流。
+//! 尚未接入：文字工具（需原生输入控件）、历史库、上传工作流。
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -27,8 +28,8 @@ use pinwall_core::annotation::{AnnotationEditor, EditEvent, EditOutcome, Shape, 
 use pinwall_core::{Event, Outcome, Selection, SelectionMachine};
 use pinwall_platform::geom::Rect;
 use pinwall_platform::{
-    copy_image_to_clipboard, current_platform, DrawCommand, OverlaySet, PinImage, PinWindow,
-    Platform, PointerEvent, Rgba, ToolbarItem,
+    copy_image_to_clipboard, current_platform, flatten_annotations, DrawCommand, OverlaySet,
+    PinImage, PinWindow, Platform, PointerEvent, Rgba, ToolbarItem,
 };
 
 fn main() {
@@ -90,8 +91,8 @@ PinWall  —— 把截图钉在屏幕上
   ⌘⇧A   截图并贴到屏幕上（拖拽框选，右键取消）
   ⌘⇧X   关闭所有贴图
   ⌘⇧T   切换所有贴图的鼠标穿透
-  ⌘⇧S   把最近一张贴图存到桌面
-  ⌘⇧C   把最近一张贴图复制到剪贴板
+  ⌘⇧S   把最近一张贴图存到桌面（含标注）
+  ⌘⇧C   把最近一张贴图复制到剪贴板（含标注）
   ⌘⇧E   在最近一张贴图上进出标注模式
   ⌘⇧Z   撤销标注
   Ctrl-C 退出
@@ -209,7 +210,7 @@ PinWall  —— 把截图钉在屏幕上
                 }
             } else if ev.id == save_key.id() {
                 match pins.last() {
-                    Some(p) => match save_to_desktop(&p.image) {
+                    Some(p) => match p.export_image().and_then(|img| save_to_desktop(&img)) {
                         Ok(path) => println!("已保存 {}", path.display()),
                         Err(e) => eprintln!("保存失败: {e}"),
                     },
@@ -217,8 +218,16 @@ PinWall  —— 把截图钉在屏幕上
                 }
             } else if ev.id == copy_key.id() {
                 match pins.last() {
-                    Some(p) => match copy_image_to_clipboard(&p.as_pin_image()) {
-                        Ok(()) => println!("已复制最近一张贴图到剪贴板"),
+                    Some(p) => match p.export_image().and_then(|img| {
+                        copy_image_to_clipboard(&PinImage {
+                            width: img.width,
+                            height: img.height,
+                            scale: img.scale,
+                            bgra: &img.bgra,
+                        })
+                        .map_err(Into::into)
+                    }) {
+                        Ok(()) => println!("已复制最近一张贴图到剪贴板（含标注）"),
                         Err(e) => eprintln!("复制失败: {e}"),
                     },
                     None => println!("当前没有贴图可复制"),
@@ -276,6 +285,18 @@ impl Pin {
     /// 这层翻译是必要的：标注模型在 pinwall-core，而它依赖
     /// pinwall-platform 的几何类型，窗口层无法反向依赖它。
     fn draw_commands(&self) -> Vec<DrawCommand> {
+        self.commands(true)
+    }
+
+    /// 导出用的指令：不含选中框。
+    ///
+    /// 选中框是**编辑期的提示**，不是画面的一部分。烧进导出图里
+    /// 就成了一个谁也解释不清的蓝框。
+    fn export_commands(&self) -> Vec<DrawCommand> {
+        self.commands(false)
+    }
+
+    fn commands(&self, include_selection: bool) -> Vec<DrawCommand> {
         let mut out = Vec::with_capacity(self.editor.objects().len() + 1);
         for o in self.editor.objects() {
             let color = Rgba::new(o.color.r, o.color.g, o.color.b, o.color.a);
@@ -296,12 +317,32 @@ impl Pin {
                 },
             });
         }
-        if let Some(i) = self.editor.selected() {
-            if let Some(o) = self.editor.objects().get(i) {
-                out.push(DrawCommand::SelectionBox { rect: o.bounds() });
+        if include_selection {
+            if let Some(i) = self.editor.selected() {
+                if let Some(o) = self.editor.objects().get(i) {
+                    out.push(DrawCommand::SelectionBox { rect: o.bounds() });
+                }
             }
         }
         out
+    }
+
+    /// 把标注烧进像素，得到可导出的图像。
+    ///
+    /// 屏幕上标注只是**叠加显示**，从未与底图合并。存盘和复制若直接用
+    /// 原始像素，导出的就是没有标注的干净原图 —— 用户画了半天，
+    /// 粘出去一看什么都没有。
+    ///
+    /// 无标注时 `flatten_annotations` 直接返回原数据，不多走一遍重绘。
+    fn export_image(&self) -> Result<CapturedImage, Box<dyn std::error::Error>> {
+        let cmds = self.export_commands();
+        let bgra = flatten_annotations(&self.as_pin_image(), &cmds)?;
+        Ok(CapturedImage {
+            width: self.image.width,
+            height: self.image.height,
+            scale: self.image.scale,
+            bgra,
+        })
     }
 
     /// 工具栏按钮定义。id 与 [`Self::tool_from_id`] 对应。

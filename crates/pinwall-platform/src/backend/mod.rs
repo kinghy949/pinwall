@@ -14,6 +14,10 @@ mod toolbar_view;
 mod image;
 #[cfg(target_os = "macos")]
 mod clipboard;
+#[cfg(target_os = "macos")]
+mod annot_draw;
+#[cfg(target_os = "macos")]
+mod flatten;
 
 #[cfg(not(target_os = "macos"))]
 mod unimplemented_backend;
@@ -40,4 +44,21 @@ pub fn copy_image_to_clipboard(image: &crate::PinImage<'_>) -> Result<()> {
 #[cfg(not(target_os = "macos"))]
 pub fn copy_image_to_clipboard(_image: &crate::PinImage<'_>) -> Result<()> {
     Err(crate::Error::Unsupported("clipboard"))
+}
+
+/// 把标注烧进图像，返回新的 BGRA8 数据（尺寸不变）。
+#[cfg(target_os = "macos")]
+pub fn flatten_annotations(
+    image: &crate::PinImage<'_>,
+    commands: &[crate::DrawCommand],
+) -> Result<Vec<u8>> {
+    flatten::flatten(image, commands)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn flatten_annotations(
+    image: &crate::PinImage<'_>,
+    _commands: &[crate::DrawCommand],
+) -> Result<Vec<u8>> {
+    Ok(image.bgra.to_vec())
 }
