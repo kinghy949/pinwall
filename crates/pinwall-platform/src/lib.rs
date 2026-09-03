@@ -60,8 +60,24 @@ impl ScreenInfo {
     }
 }
 
+/// 一张待贴出的位图，像素格式为 BGRA8。
+///
+/// 定义在此处而非捕获层，是为了让窗口层不必反向依赖捕获层；
+/// 捕获层的 `CapturedImage` 可零成本借用为本类型。
+pub struct PinImage<'a> {
+    pub width: u32,
+    pub height: u32,
+    /// 逻辑点→像素倍率。贴图窗口按 `width / scale` 的逻辑尺寸显示，
+    /// 从而在 Retina 屏上呈现为原始大小而非两倍放大。
+    pub scale: f64,
+    pub bgra: &'a [u8],
+}
+
 /// 贴图浮窗：置顶、可跨 Space、可覆盖其他应用的全屏窗口。
 pub trait PinWindow {
+    /// 设置窗口显示的图像。窗口尺寸会按图像的逻辑尺寸调整。
+    fn set_image(&self, image: &PinImage<'_>) -> Result<()>;
+
     fn show(&self);
     fn hide(&self);
     /// 关闭并释放。**不要只调 `hide()` 就丢弃** —— 浮窗会长期累积。
@@ -75,6 +91,22 @@ pub trait PinWindow {
     fn current_screen(&self) -> Option<ScreenId>;
 }
 
+/// 遮罩上的指针事件。坐标均为**全局逻辑坐标**，已由后端换算完毕。
+///
+/// 换算发生在后端是有意为之：遮罩是每屏一个窗口，各窗口的局部坐标系
+/// 互不相同，若把换算留给上层，跨屏框选的逻辑会被窗口边界污染。
+#[derive(Debug, Clone, Copy)]
+pub enum PointerEvent {
+    Down(Point),
+    Moved(Point),
+    Up(Point),
+    /// 取消，来自右键或 Esc。
+    Cancel,
+}
+
+/// 遮罩指针事件的回调。所有遮罩共享同一个回调，从而汇入同一个选区状态机。
+pub type PointerHandler = std::rc::Rc<dyn Fn(PointerEvent)>;
+
 /// 单块显示器上的捕获遮罩。
 ///
 /// 全屏捕获需要为**每块显示器**各建一个，由 [`OverlaySet`] 统一管理。
@@ -84,6 +116,15 @@ pub trait Overlay {
     fn close(self: Box<Self>);
     fn screen_id(&self) -> ScreenId;
     fn frame(&self) -> Rect;
+
+    /// 设置指针事件回调。N 个遮罩应共享同一个回调。
+    fn set_pointer_handler(&self, handler: PointerHandler);
+
+    /// 设置当前选区（全局坐标），用于在遮罩上绘制镂空。
+    ///
+    /// 选区可能跨屏，故**每次变化都要设给所有遮罩**，
+    /// 由各遮罩自行判断与本屏是否相交。
+    fn set_selection(&self, rect: Option<Rect>);
 }
 
 /// 平台后端。
@@ -124,6 +165,20 @@ impl OverlaySet {
     pub fn hide(&self) {
         for o in &self.overlays {
             o.hide();
+        }
+    }
+
+    /// 把同一个指针回调装到所有遮罩上。
+    pub fn set_pointer_handler(&self, handler: PointerHandler) {
+        for o in &self.overlays {
+            o.set_pointer_handler(handler.clone());
+        }
+    }
+
+    /// 广播当前选区。必须设给所有遮罩 —— 选区可能横跨其中数块。
+    pub fn set_selection(&self, rect: Option<Rect>) {
+        for o in &self.overlays {
+            o.set_selection(rect);
         }
     }
 

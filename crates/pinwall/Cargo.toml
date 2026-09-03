@@ -1,0 +1,22 @@
+[package]
+name = "pinwall"
+description = "把截图钉在屏幕上"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pinwall"
+path = "src/main.rs"
+
+[dependencies]
+pinwall-platform = { path = "../pinwall-platform" }
+pinwall-capture = { path = "../pinwall-capture" }
+pinwall-core = { path = "../pinwall-core" }
+global-hotkey = "0.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true

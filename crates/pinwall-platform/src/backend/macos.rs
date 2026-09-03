@@ -7,14 +7,17 @@
 //! 2. 遮罩每屏一个，不能用并集构造单个跨屏窗口。
 
 use objc2::rc::Retained;
-use objc2::{MainThreadMarker, MainThreadOnly};
+use std::cell::{Cell, RefCell};
+use objc2::{AnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSPanel, NSScreen, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSBackingStoreType, NSBitmapImageRep, NSColor, NSImage, NSImageView, NSPanel, NSScreen,
+    NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use crate::geom::{Point, Rect};
-use crate::{Error, Overlay, PinWindow, Platform, Result, ScreenId, ScreenInfo};
+use super::overlay_view::{OverlayView, OverlayViewIvars};
+use crate::{Error, Overlay, PinImage, PinWindow, Platform, PointerHandler, Result, ScreenId, ScreenInfo};
 
 /// `NSScreenSaverWindowLevel`。实测该层级配合 NonactivatingPanel 可覆盖全屏应用。
 const OVERLAY_LEVEL: isize = 1000;
@@ -105,16 +108,34 @@ impl Platform for MacPlatform {
         Ok(Box::new(MacPin {
             panel,
             primary_height: self.primary_height(),
+            mtm: self.mtm,
         }))
     }
 
     fn create_overlay(&self, screen: &ScreenInfo) -> Result<Box<dyn Overlay>> {
-        let panel = self.make_panel(self.to_cocoa(screen.frame), false);
-        panel.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-            0.0, 0.0, 0.0, 0.35,
-        )));
+        let cocoa = self.to_cocoa(screen.frame);
+        let panel = self.make_panel(cocoa, false);
+        // 背景交给视图绘制（需要在压暗层上镂空选区），窗口本身保持透明
+        panel.setBackgroundColor(Some(&NSColor::clearColor()));
+
+        let view = OverlayView::new(
+            self.mtm,
+            NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(cocoa.size.width, cocoa.size.height),
+            ),
+            OverlayViewIvars {
+                screen_frame: screen.frame,
+                primary_height: self.primary_height(),
+                handler: RefCell::new(None),
+                selection: Cell::new(None),
+            },
+        );
+        panel.setContentView(Some(&view));
+
         Ok(Box::new(MacOverlay {
             panel,
+            view,
             screen_id: screen.id,
             frame: screen.frame,
         }))
@@ -126,9 +147,73 @@ impl Platform for MacPlatform {
 struct MacPin {
     panel: Retained<NSPanel>,
     primary_height: f64,
+    mtm: MainThreadMarker,
 }
 
 impl PinWindow for MacPin {
+    fn set_image(&self, image: &PinImage<'_>) -> Result<()> {
+        if image.width == 0 || image.height == 0 {
+            return Err(Error::WindowCreation("图像尺寸为零".into()));
+        }
+        let expected = image.width as usize * image.height as usize * 4;
+        if image.bgra.len() < expected {
+            return Err(Error::WindowCreation(format!(
+                "像素数据长度不足：需要 {expected}，实得 {}",
+                image.bgra.len()
+            )));
+        }
+
+        // NSBitmapImageRep 需要可写的行指针；此处复制一份由 rep 持有。
+        // 直接借用调用方的切片会在其释放后留下悬垂指针。
+        let mut buf = image.bgra.to_vec();
+        let mut plane: *mut u8 = buf.as_mut_ptr();
+
+        let rep = unsafe {
+            NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bitmapFormat_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(),
+                &mut plane as *mut *mut u8,
+                image.width as isize,
+                image.height as isize,
+                8,
+                4,
+                true,
+                false,
+                objc2_app_kit::NSDeviceRGBColorSpace,
+                // BGRA 预乘 alpha、小端序 —— 与捕获层输出格式一致
+                objc2_app_kit::NSBitmapFormat::ThirtyTwoBitLittleEndian
+                    | objc2_app_kit::NSBitmapFormat(0),
+                image.width as isize * 4,
+                32,
+            )
+        }
+        .ok_or_else(|| Error::WindowCreation("创建位图表示失败".into()))?;
+
+        // 逻辑尺寸 = 像素尺寸 / 倍率，这样 Retina 屏上显示为原始大小
+        let logical_w = image.width as f64 / image.scale;
+        let logical_h = image.height as f64 / image.scale;
+        let ns_image = NSImage::initWithSize(NSImage::alloc(), NSSize::new(logical_w, logical_h));
+        ns_image.addRepresentation(&rep);
+
+        let view = NSImageView::initWithFrame(
+            NSImageView::alloc(self.mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(logical_w, logical_h)),
+        );
+        view.setImage(Some(&ns_image));
+        self.panel.setContentView(Some(&view));
+
+        // 保持左上角不动地调整尺寸 —— Cocoa 的 origin 在左下角，
+        // 直接改 size 会让窗口视觉上向下生长
+        let old = self.panel.frame();
+        let new_origin = NSPoint::new(old.origin.x, old.origin.y + old.size.height - logical_h);
+        self.panel.setFrame_display(
+            NSRect::new(new_origin, NSSize::new(logical_w, logical_h)),
+            true,
+        );
+        // rep 已持有自己的像素副本，buf 可安全释放
+        drop(buf);
+        Ok(())
+    }
+
     fn show(&self) {
         self.panel.orderFrontRegardless();
     }
@@ -181,6 +266,7 @@ impl PinWindow for MacPin {
 
 struct MacOverlay {
     panel: Retained<NSPanel>,
+    view: Retained<OverlayView>,
     screen_id: ScreenId,
     frame: Rect,
 }
@@ -204,5 +290,13 @@ impl Overlay for MacOverlay {
 
     fn frame(&self) -> Rect {
         self.frame
+    }
+
+    fn set_pointer_handler(&self, handler: PointerHandler) {
+        self.view.set_handler(handler);
+    }
+
+    fn set_selection(&self, rect: Option<Rect>) {
+        self.view.set_selection(rect);
     }
 }

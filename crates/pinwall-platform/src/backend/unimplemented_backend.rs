@@ -4,7 +4,7 @@
 //! Linux 侧受 Wayland 协议限制（客户端不得设置窗口位置），仅计划支持 X11 / XWayland。
 
 use crate::geom::Rect;
-use crate::{Error, Overlay, Platform, PinWindow, Result, ScreenInfo};
+use crate::{Error, Overlay, PinImage, Platform, PinWindow, PointerHandler, Result, ScreenInfo};
 
 pub struct StubPlatform;
 
