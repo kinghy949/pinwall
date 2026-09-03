@@ -72,6 +72,35 @@ impl Rect {
         Rect::from_xywh(x, y, mx - x, my - y)
     }
 
+    /// 求交集。无重叠或退化为零面积时返回 `None`。
+    ///
+    /// 跨屏框选时用它把选区按屏切分：选区与各屏 frame 求交，
+    /// 得到每块屏需要各自捕获的部分。
+    pub fn intersection(&self, other: &Rect) -> Option<Rect> {
+        let x = self.origin.x.max(other.origin.x);
+        let y = self.origin.y.max(other.origin.y);
+        let mx = self.max_x().min(other.max_x());
+        let my = self.max_y().min(other.max_y());
+        if mx > x && my > y {
+            Some(Rect::from_xywh(x, y, mx - x, my - y))
+        } else {
+            None
+        }
+    }
+
+    /// 由任意两点构造矩形，自动归一化。
+    ///
+    /// 框选时用户可能从右下往左上拖，此时原始的宽高为负，须归一化。
+    pub fn from_points(a: Point, b: Point) -> Rect {
+        let x = a.x.min(b.x);
+        let y = a.y.min(b.y);
+        Rect::from_xywh(x, y, (a.x - b.x).abs(), (a.y - b.y).abs())
+    }
+
+    pub fn area(&self) -> f64 {
+        self.size.width * self.size.height
+    }
+
     pub fn contains(&self, p: Point) -> bool {
         p.x >= self.origin.x && p.x < self.max_x() && p.y >= self.origin.y && p.y < self.max_y()
     }

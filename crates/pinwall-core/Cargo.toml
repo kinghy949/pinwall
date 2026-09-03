@@ -1,0 +1,10 @@
+[package]
+name = "pinwall-core"
+description = "PinWall 的平台无关核心逻辑：选区、标注、历史"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pinwall-platform = { path = "../pinwall-platform" }

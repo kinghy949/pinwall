@@ -348,9 +348,17 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation",
  "objc2-screen-capture-kit",
+ "pinwall-core",
  "pinwall-platform",
  "png",
  "thiserror",
+]
+
+[[package]]
+name = "pinwall-core"
+version = "0.1.0"
+dependencies = [
+ "pinwall-platform",
 ]
 
 [[package]]

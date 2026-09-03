@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 pinwall-platform = { path = "../pinwall-platform" }
+pinwall-core = { path = "../pinwall-core" }
 thiserror.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

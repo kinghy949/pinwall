@@ -88,5 +88,8 @@ pub enum Permission {
     NotRequired,
 }
 
+mod compose;
+pub use compose::capture_selection;
+
 mod backend;
 pub use backend::{current_capturer, permission_status, request_permission};
