@@ -34,14 +34,11 @@ struct Combo {
 const MAX_LEVEL: isize = 2_147_483_631;
 
 const COMBOS: &[Combo] = &[
-    Combo { label: "Status(25) + 全量behavior + Regular   【已知失败，作对照】", level: 25,        behavior: 0, accessory: false },
-    Combo { label: "PopUpMenu(101) + 全量behavior + Regular",                    level: 101,       behavior: 0, accessory: false },
-    Combo { label: "ScreenSaver(1000) + 全量behavior + Regular",                 level: 1000,      behavior: 0, accessory: false },
-    Combo { label: "ScreenSaver(1000) + 全量behavior + Accessory",               level: 1000,      behavior: 0, accessory: true  },
-    Combo { label: "PopUpMenu(101) + 全量behavior + Accessory",                  level: 101,       behavior: 0, accessory: true  },
-    Combo { label: "Status(25) + 全量behavior + Accessory",                      level: 25,        behavior: 0, accessory: true  },
-    Combo { label: "ScreenSaver(1000) + 仅CanJoinAllSpaces + Accessory",         level: 1000,      behavior: 1, accessory: true  },
-    Combo { label: "Maximum(2^31-17) + 全量behavior + Accessory",                level: MAX_LEVEL, behavior: 0, accessory: true  },
+    Combo { label: "ScreenSaver(1000) + FullScreenNone      【主推方案】", level: 1000,      behavior: 3, accessory: true },
+    Combo { label: "ScreenSaver(1000) + FullScreenAuxiliary 【已知失败，对照】", level: 1000, behavior: 0, accessory: true },
+    Combo { label: "ScreenSaver(1000) + 无fullscreen标志",                 level: 1000,      behavior: 1, accessory: true },
+    Combo { label: "PopUpMenu(101)    + FullScreenNone",                   level: 101,       behavior: 3, accessory: true },
+    Combo { label: "Maximum(2^31-17)  + FullScreenNone",                   level: MAX_LEVEL, behavior: 3, accessory: true },
 ];
 
 // ---------------------------------------------------------------- macOS 实现
@@ -50,10 +47,7 @@ const COMBOS: &[Combo] = &[
 mod platform {
     use super::Combo;
     use objc2::rc::Retained;
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSView, NSWindow, NSWindowCollectionBehavior,
-    };
+    use objc2_app_kit::{NSView, NSWindow, NSWindowCollectionBehavior};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::window::Window;
 
@@ -86,21 +80,55 @@ mod platform {
                 NSWindowCollectionBehavior::CanJoinAllSpaces
                     | NSWindowCollectionBehavior::Stationary
             }
+            3 => {
+                // FullScreenAuxiliary 的语义是「作为全屏应用的附属窗口」，
+                // 与「凌驾于他人全屏之上」方向相反。改用 FullScreenNone：
+                // 声明本窗口不参与全屏机制，仅靠 CanJoinAllSpaces 跨 Space。
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::Stationary
+                    | NSWindowCollectionBehavior::IgnoresCycle
+                    | NSWindowCollectionBehavior::FullScreenNone
+            }
             _ => NSWindowCollectionBehavior::FullScreenAuxiliary,
         };
         w.setCollectionBehavior(behavior);
 
         // 激活策略：Accessory 让 App 不占 Dock、不强制切 Space，
         // 这是覆盖他人全屏窗口时常被忽略的一环
-        if let Some(mtm) = MainThreadMarker::new() {
-            let app = NSApplication::sharedApplication(mtm);
-            let policy = if c.accessory {
-                NSApplicationActivationPolicy::Accessory
-            } else {
-                NSApplicationActivationPolicy::Regular
-            };
-            app.setActivationPolicy(policy);
+        // 激活策略不再运行时切换：已由 .app bundle 的 LSUIElement=1 在启动时固化，
+        // 运行时调用 setActivationPolicy 对 Space 参与行为不可靠。
+
+        // 关键：把窗口重新排入当前 Space，且不激活本应用。
+        // 仅设置 level / collectionBehavior 不会让一个已被 order out 的窗口
+        // 出现在新切换到的全屏 Space 中 —— 上一版正是漏了这一步。
+        w.orderFrontRegardless();
+    }
+
+    /// 回传窗口当前的真实状态，用于在日志里直接判定成败，
+    /// 不必依赖人眼观察。
+    pub fn probe(window: &Window) -> String {
+        let Some(w) = ns_window(window) else {
+            return "<无 NSWindow>".into();
+        };
+        let cb = w.collectionBehavior().0;
+        // 位含义：1=CanJoinAllSpaces 2=MoveToActiveSpace 16=Stationary
+        //         64=IgnoresCycle 128=FullScreenPrimary 256=FullScreenAuxiliary
+        let mut flags = Vec::new();
+        for (bit, name) in [
+            (1usize, "CanJoinAllSpaces"), (2, "MoveToActiveSpace"), (4, "Managed"),
+            (8, "Transient"), (16, "Stationary"), (32, "ParticipatesInCycle"),
+            (64, "IgnoresCycle"), (128, "FullScreenPrimary"), (256, "FullScreenAuxiliary"),
+            (512, "FullScreenNone"),
+        ] {
+            if cb & bit != 0 { flags.push(name); }
         }
+        format!(
+            "isVisible={} isOnActiveSpace={} level={} cb={cb}[{}]",
+            w.isVisible(),
+            w.isOnActiveSpace(),
+            w.level(),
+            flags.join("|"),
+        )
     }
 }
 
@@ -109,6 +137,7 @@ mod platform {
     use super::Combo;
     use winit::window::Window;
     pub fn apply(_w: &Window, _c: &Combo) {}
+    pub fn probe(_w: &Window) -> String { "<非 macOS>".into() }
 }
 
 // ---------------------------------------------------------------- 应用
@@ -150,6 +179,9 @@ impl App {
             c.label
         );
         println!("   level={}  behavior_preset={}  accessory={}", c.level, c.behavior, c.accessory);
+        if let Some(w) = &self.window {
+            println!("   探针: {}", platform::probe(w));
+        }
     }
 }
 
