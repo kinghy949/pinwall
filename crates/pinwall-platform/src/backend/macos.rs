@@ -105,6 +105,8 @@ impl Platform for MacPlatform {
 
     fn create_pin(&self, frame: Rect) -> Result<Box<dyn PinWindow>> {
         let panel = self.make_panel(self.to_cocoa(frame), true);
+        // 投影进一步把贴图与其下方的真实界面区分开
+        panel.setHasShadow(true);
         panel.orderFrontRegardless();
         Ok(Box::new(MacPin {
             panel,

@@ -7,13 +7,25 @@ use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSImage, NSView};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSGraphicsContext, NSImage, NSView};
+use objc2_core_graphics::CGContext;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 
 /// 缩放范围。下限保证贴图不会小到点不中，上限避免无意义的糊放大。
 const ZOOM_MIN: f64 = 0.1;
 const ZOOM_MAX: f64 = 8.0;
 const OPACITY_MIN: f64 = 0.1;
+
+/// 矩形四边同时内缩。
+fn inset(r: NSRect, d: f64) -> NSRect {
+    NSRect::new(
+        NSPoint::new(r.origin.x + d, r.origin.y + d),
+        NSSize::new(
+            (r.size.width - d * 2.0).max(0.0),
+            (r.size.height - d * 2.0).max(0.0),
+        ),
+    )
+}
 
 pub struct PinViewIvars {
     pub image: RefCell<Option<Retained<NSImage>>>,
@@ -114,6 +126,7 @@ define_class!(
             if let Some(img) = self.ivars().image.borrow().as_ref() {
                 img.drawInRect(bounds);
             }
+            self.draw_border(bounds);
         }
     }
 );
@@ -197,6 +210,27 @@ impl PinView {
 
     pub fn is_closed(&self) -> bool {
         self.ivars().closed.get()
+    }
+
+    /// 描一圈双色细边。
+    ///
+    /// 贴图与其下方的真实界面在视觉上极易混淆——用户会对着一张静止的
+    /// 截图反复点击，以为界面卡住了。加一圈边框是最低成本的区分手段。
+    ///
+    /// 外深内浅两条线是经典做法：单一颜色的边框在与之相近的背景上会消失，
+    /// 深浅并置则在任何底色上都能看见其中一条。
+    fn draw_border(&self, bounds: NSRect) {
+        let Some(nsctx) = NSGraphicsContext::currentContext() else { return };
+        let ctx = nsctx.CGContext();
+        CGContext::set_line_width(Some(&ctx), 1.0);
+
+        // 外圈深色。0.5 的内缩使 1 像素的线正好落在像素格上，不会被抗锯齿糊成两像素
+        CGContext::set_rgb_stroke_color(Some(&ctx), 0.0, 0.0, 0.0, 0.45);
+        CGContext::stroke_rect(Some(&ctx), inset(bounds, 0.5));
+
+        // 内圈浅色
+        CGContext::set_rgb_stroke_color(Some(&ctx), 1.0, 1.0, 1.0, 0.30);
+        CGContext::stroke_rect(Some(&ctx), inset(bounds, 1.5));
     }
 
     fn close_self(&self) {
