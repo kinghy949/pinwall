@@ -7,6 +7,7 @@
 | [`pin-window`](pin-window/) | winit NSWindow 能否覆盖全屏 | **已完成 —— 结论为否** |
 | [`pin-panel`](pin-panel/) | NSPanel + NonactivatingPanel 能否覆盖全屏 | **已完成 —— 通过** |
 | [`annot-editor`](annot-editor/) | egui 矢量标注对象编辑 + 中文 IME | **已完成 —— 全部通过** |
+| [`hotpath`](hotpath/) | 热键 → 遮罩首帧延迟 | **已完成 —— 达标（0.11ms）** |
 
 ## pin-window
 
@@ -65,3 +66,16 @@ cd prototypes/annot-editor && cargo run
 
 **中文输入验证**：选「文字」工具在画布点一下，切到中文输入法打字，
 观察候选词窗位置、拼音上屏、退格删词是否正常。
+
+
+## hotpath
+
+测量热键回调到遮罩首帧的延迟，并对比「预热」与「按需创建」两条路径。
+
+```bash
+cd prototypes/hotpath && cargo build --release
+# 需打成 .app bundle 并设 LSUIElement=1 后运行，按 ⌘⇧A 触发一轮测量
+```
+
+结论：预热 0.11ms / 冷建 0.96ms（中位），目标 50ms，达标。
+预热收益仅 0.86ms，不足以抵偿常驻内存代价，故取消预热。
