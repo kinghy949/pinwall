@@ -304,7 +304,7 @@ impl eframe::App for App {
         if resp.clicked() && self.tool == Tool::Text {
             if let Some(p) = pointer {
                 self.doc.objs.push(Obj {
-                    shape: Shape::Text("双击编辑".into()),
+                    shape: Shape::Text(String::new()),
                     a: p,
                     b: p + Vec2::new(220.0, 34.0),
                     color: self.color,
@@ -353,13 +353,23 @@ impl eframe::App for App {
                 }
                 Shape::Text(s) => {
                     if self.editing != Some(i) {
-                        painter.text(
-                            o.a,
-                            egui::Align2::LEFT_TOP,
-                            s,
-                            egui::FontId::proportional(20.0),
-                            o.color,
-                        );
+                        if s.is_empty() {
+                            painter.text(
+                                o.a,
+                                egui::Align2::LEFT_TOP,
+                                "(空文本)",
+                                egui::FontId::proportional(20.0),
+                                Color32::from_gray(90),
+                            );
+                        } else {
+                            painter.text(
+                                o.a,
+                                egui::Align2::LEFT_TOP,
+                                s,
+                                egui::FontId::proportional(20.0),
+                                o.color,
+                            );
+                        }
                     }
                 }
             }
@@ -388,12 +398,31 @@ impl eframe::App for App {
                 _ => None,
             });
             if let Some((a, mut text, color)) = cur {
-                let r = ui.put(
-                    Rect::from_min_size(a, Vec2::new(280.0, 32.0)),
-                    egui::TextEdit::singleline(&mut text)
-                        .font(egui::FontId::proportional(20.0))
-                        .text_color(color),
-                );
+                // 所见即所得的原位编辑需要三处补偿，缺一处文字就会在
+                // 编辑态与非编辑态之间跳动：
+                //   1. ui.put 用的是 centered_and_justified 布局，会把文字居中，
+                //      须改用 UiBuilder + left_to_right(Align::Min) 保持左上对齐
+                //   2. TextEdit 默认 margin 为 Margin::symmetric(4, 2)，须清零
+                //   3. TextEdit 默认带 Frame（白底+边框），须设为 Frame::NONE
+                // 这三点是 egui 做标注文字编辑的实际成本，非显然。
+                let edit_rect = Rect::from_min_size(a, Vec2::new(280.0, 30.0));
+                let r = ui
+                    .scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(edit_rect)
+                            .layout(egui::Layout::left_to_right(egui::Align::Min)),
+                        |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut text)
+                                    .frame(egui::Frame::NONE)
+                                    .margin(egui::Margin::ZERO)
+                                    .desired_width(280.0)
+                                    .font(egui::FontId::proportional(20.0))
+                                    .text_color(color),
+                            )
+                        },
+                    )
+                    .inner;
                 if !r.has_focus() {
                     r.request_focus();
                 }
