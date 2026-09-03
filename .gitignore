@@ -21,3 +21,4 @@ Thumbs.db
 # Prototype build output
 prototypes/*/target/
 prototypes/*/PinWallProto.app/
+prototypes/*/PinPanelProto.app/
