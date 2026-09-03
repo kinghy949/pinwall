@@ -17,3 +17,6 @@ Thumbs.db
 .env
 .env.local
 *.local.toml
+
+# Prototype build output
+prototypes/*/target/
