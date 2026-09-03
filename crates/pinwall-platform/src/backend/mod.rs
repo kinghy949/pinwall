@@ -9,6 +9,8 @@ mod overlay_view;
 #[cfg(target_os = "macos")]
 mod pin_view;
 #[cfg(target_os = "macos")]
+mod toolbar_view;
+#[cfg(target_os = "macos")]
 mod image;
 #[cfg(target_os = "macos")]
 mod clipboard;

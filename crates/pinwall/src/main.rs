@@ -5,7 +5,7 @@
 //!
 //! 尚未接入：标注编辑、历史库、上传工作流。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::VecDeque;
@@ -28,7 +28,7 @@ use pinwall_core::{Event, Outcome, Selection, SelectionMachine};
 use pinwall_platform::geom::Rect;
 use pinwall_platform::{
     copy_image_to_clipboard, current_platform, DrawCommand, OverlaySet, PinImage, PinWindow,
-    Platform, PointerEvent, Rgba,
+    Platform, PointerEvent, Rgba, ToolbarItem,
 };
 
 fn main() {
@@ -96,8 +96,9 @@ PinWall  —— 把截图钉在屏幕上
   ⌘⇧Z   撤销标注
   Ctrl-C 退出
 
-标注模式下：⌘⇧1 选择  ⌘⇧2 矩形  ⌘⇧3 箭头  ⌘⇧4 打码
-            拖拽绘制，右键删除选中
+标注模式下会在贴图下方浮出工具栏，可直接点击切换工具；
+也可用 ⌘⇧1 选择  ⌘⇧2 矩形  ⌘⇧3 箭头  ⌘⇧4 打码。
+拖拽绘制，右键删除选中。
 
 截图完成后会自动复制到剪贴板。
 
@@ -138,9 +139,14 @@ PinWall  —— 把截图钉在屏幕上
 
         // 驱动处于标注模式的贴图
         for pin in pins.iter_mut() {
+            if let Some(id) = pin.pending_tool.take() {
+                if let Some(t) = Pin::tool_from_id(id) {
+                    pin.editor.set_tool(t);
+                    pin.refresh();
+                }
+            }
             if pin.pump_annotation() {
-                let cmds = pin.draw_commands();
-                pin.window.set_draw_commands(&cmds);
+                pin.refresh();
             }
         }
 
@@ -176,8 +182,13 @@ PinWall  —— 把截图钉在屏幕上
                     Some(p) => {
                         let on = !p.window.is_annotation_mode();
                         p.window.set_annotation_mode(on);
+                        if on {
+                            p.window.set_toolbar(&p.toolbar_items());
+                        } else {
+                            p.window.set_toolbar(&[]);
+                        }
                         println!(
-                            "{}标注模式（⌘⇧1 选择 / ⌘⇧2 矩形 / ⌘⇧3 箭头 / ⌘⇧4 打码，右键删除选中）",
+                            "{}标注模式（工具栏可点击，或用 ⌘⇧1~4；右键删除选中）",
                             if on { "已进入" } else { "已退出" }
                         );
                     }
@@ -186,18 +197,15 @@ PinWall  —— 把截图钉在屏幕上
             } else if ev.id == undo_key.id() {
                 if let Some(p) = pins.last_mut() {
                     if p.editor.undo() {
-                        let cmds = p.draw_commands();
-                        p.window.set_draw_commands(&cmds);
+                        p.refresh();
                     }
                 }
             } else if let Some((_, tool)) = tool_keys.iter().find(|(k, _)| ev.id == k.id()) {
                 if let Some(p) = pins.last_mut() {
                     // 文字工具需原生输入控件，尚未接入，故未占用快捷键位
-                    let t = *tool;
-                    p.editor.set_tool(t);
-                    let cmds = p.draw_commands();
-                    p.window.set_draw_commands(&cmds);
-                    println!("工具: {t:?}");
+                    p.editor.set_tool(*tool);
+                    p.refresh();
+                    println!("工具: {tool:?}");
                 }
             } else if ev.id == save_key.id() {
                 match pins.last() {
@@ -241,6 +249,11 @@ struct Pin {
     window: Box<dyn PinWindow>,
     image: CapturedImage,
     editor: AnnotationEditor,
+    /// 工具栏点击产生的待处理工具切换。
+    ///
+    /// 与指针事件同理：回调不能直接改编辑器（会捕获共享引用而成环），
+    /// 只记录待处理项，由主循环消费。
+    pending_tool: Rc<Cell<Option<u32>>>,
     /// 标注模式下的指针事件队列。
     ///
     /// 与遮罩同理：回调若直接驱动编辑器，就要捕获对编辑器的共享引用，
@@ -289,6 +302,44 @@ impl Pin {
             }
         }
         out
+    }
+
+    /// 工具栏按钮定义。id 与 [`Self::tool_from_id`] 对应。
+    fn toolbar_items(&self) -> Vec<ToolbarItem> {
+        const TOOLS: [(u32, &str, Tool); 4] = [
+            (0, "选择", Tool::Select),
+            (1, "矩形", Tool::Rect),
+            (2, "箭头", Tool::Arrow),
+            (3, "打码", Tool::Redact),
+        ];
+        let current = self.editor.tool();
+        TOOLS
+            .iter()
+            .map(|(id, label, tool)| ToolbarItem {
+                id: *id,
+                label: (*label).to_string(),
+                selected: *tool == current,
+            })
+            .collect()
+    }
+
+    fn tool_from_id(id: u32) -> Option<Tool> {
+        match id {
+            0 => Some(Tool::Select),
+            1 => Some(Tool::Rect),
+            2 => Some(Tool::Arrow),
+            3 => Some(Tool::Redact),
+            _ => None,
+        }
+    }
+
+    /// 刷新工具栏的选中态与画面。
+    fn refresh(&self) {
+        let cmds = self.draw_commands();
+        self.window.set_draw_commands(&cmds);
+        if self.window.is_annotation_mode() {
+            self.window.set_toolbar(&self.toolbar_items());
+        }
     }
 
     /// 消费队列中的指针事件，返回是否需要重绘。
@@ -446,10 +497,17 @@ fn capture_and_pin(
         }));
     }
 
+    let pending_tool: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
+    {
+        let slot = pending_tool.clone();
+        pin.set_toolbar_handler(Rc::new(move |id: u32| slot.set(Some(id))));
+    }
+
     Ok(Some(Pin {
         window: pin,
         image: img,
         editor: AnnotationEditor::new(),
         events,
+        pending_tool,
     }))
 }

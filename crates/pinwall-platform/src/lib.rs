@@ -95,6 +95,20 @@ pub enum DrawCommand {
     SelectionBox { rect: Rect },
 }
 
+/// 工具栏上的一个按钮。
+///
+/// 窗口层不理解「工具」的语义，只按 `id` 回报点击，由应用层映射到
+/// 具体工具 —— 与 [`DrawCommand`] 同理，标注模型不能被窗口层依赖。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolbarItem {
+    pub id: u32,
+    pub label: String,
+    pub selected: bool,
+}
+
+/// 工具栏点击回调，参数为被点按钮的 `id`。
+pub type ToolbarHandler = std::rc::Rc<dyn Fn(u32)>;
+
 /// 一张待贴出的位图，像素格式为 BGRA8。
 ///
 /// 定义在此处而非捕获层，是为了让窗口层不必反向依赖捕获层；
@@ -126,6 +140,13 @@ pub trait PinWindow {
 
     /// 设置标注模式下的指针事件回调，坐标为贴图局部逻辑点。
     fn set_pointer_handler(&self, handler: PointerHandler);
+
+    /// 设置浮动工具栏的按钮。传空切片即隐藏工具栏。
+    ///
+    /// 工具栏作为贴图窗口的子窗口存在，会自动跟随贴图移动。
+    fn set_toolbar(&self, items: &[ToolbarItem]);
+
+    fn set_toolbar_handler(&self, handler: ToolbarHandler);
 
     fn show(&self);
     fn hide(&self);

@@ -240,6 +240,7 @@ impl PinView {
         window.setFrame_display(NSRect::new(new_origin, new_size), true);
         self.setFrameSize(new_size);
         self.setNeedsDisplay(true);
+        self.reposition_children();
     }
 
     pub fn set_commands(&self, commands: &[DrawCommand]) {
@@ -260,6 +261,26 @@ impl PinView {
 
     pub fn set_handler(&self, handler: PointerHandler) {
         *self.ivars().handler.borrow_mut() = Some(handler);
+    }
+
+    /// 缩放后重新摆放子窗口（工具栏）。
+    ///
+    /// 子窗口在父窗口移动时会保持相对偏移，但父窗口**改变尺寸**时不会，
+    /// 缩放后必须重新定位。此处直接向系统查询子窗口列表，
+    /// 避免在 Rust 侧让视图与工具栏互相持有引用而构成循环。
+    fn reposition_children(&self) {
+        let Some(window) = self.window() else { return };
+        let pin = window.frame();
+        // 无子窗口时 childWindows 返回 None
+        let Some(children) = window.childWindows() else { return };
+        for i in 0..children.count() {
+            let child = children.objectAtIndex(i);
+            let size = child.frame().size;
+            let x = pin.origin.x + (pin.size.width - size.width) / 2.0;
+            // Cocoa 的 y 向上，「下方」即更小的 y
+            let y = pin.origin.y - size.height - 5.0;
+            child.setFrameOrigin(NSPoint::new(x, y));
+        }
     }
 
     fn emit(&self, event: PointerEvent) {

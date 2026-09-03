@@ -10,7 +10,8 @@ use objc2::rc::Retained;
 use std::cell::{Cell, RefCell};
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSPanel, NSScreen, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSPanel, NSScreen, NSWindowCollectionBehavior,
+    NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
@@ -18,9 +19,10 @@ use crate::geom::{Point, Rect};
 use super::overlay_view::{OverlayView, OverlayViewIvars};
 use super::image::ns_image_from_bgra;
 use super::pin_view::PinView;
+use super::toolbar_view::{toolbar_size, ToolbarView, PADDING};
 use crate::{
     DrawCommand, Error, Overlay, PinImage, PinWindow, Platform, PointerHandler, Result, ScreenId,
-    ScreenInfo,
+    ScreenInfo, ToolbarHandler, ToolbarItem,
 };
 
 /// `NSScreenSaverWindowLevel`。实测该层级配合 NonactivatingPanel 可覆盖全屏应用。
@@ -66,27 +68,31 @@ impl MacPlatform {
         )
     }
 
-    fn make_panel(&self, cocoa_frame: NSRect, opaque: bool) -> Retained<NSPanel> {
-        let panel: Retained<NSPanel> = NSPanel::initWithContentRect_styleMask_backing_defer(
-            NSPanel::alloc(self.mtm),
-            cocoa_frame,
-            // NonactivatingPanel 是能覆盖他人全屏窗口的结构前提
-            NSWindowStyleMask::NonactivatingPanel | NSWindowStyleMask::Borderless,
-            NSBackingStoreType::Buffered,
-            false,
-        );
-        panel.setFloatingPanel(true);
-        panel.setHidesOnDeactivate(false);
-        panel.setOpaque(opaque);
-        panel.setLevel(OVERLAY_LEVEL);
-        panel.setCollectionBehavior(
-            NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::Stationary
-                | NSWindowCollectionBehavior::FullScreenAuxiliary
-                | NSWindowCollectionBehavior::IgnoresCycle,
-        );
-        panel
-    }
+
+}
+
+/// 按原型 1 的结论构造面板：NSPanel + NonactivatingPanel。
+/// 贴图、遮罩、工具栏共用同一套窗口属性。
+fn make_panel(mtm: MainThreadMarker, cocoa_frame: NSRect, opaque: bool) -> Retained<NSPanel> {
+    let panel: Retained<NSPanel> = NSPanel::initWithContentRect_styleMask_backing_defer(
+        NSPanel::alloc(mtm),
+        cocoa_frame,
+        // NonactivatingPanel 是能覆盖他人全屏窗口的结构前提
+        NSWindowStyleMask::NonactivatingPanel | NSWindowStyleMask::Borderless,
+        NSBackingStoreType::Buffered,
+        false,
+    );
+    panel.setFloatingPanel(true);
+    panel.setHidesOnDeactivate(false);
+    panel.setOpaque(opaque);
+    panel.setLevel(OVERLAY_LEVEL);
+    panel.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::Stationary
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+    panel
 }
 
 impl Platform for MacPlatform {
@@ -107,13 +113,15 @@ impl Platform for MacPlatform {
     }
 
     fn create_pin(&self, frame: Rect) -> Result<Box<dyn PinWindow>> {
-        let panel = self.make_panel(self.to_cocoa(frame), true);
+        let panel = make_panel(self.mtm, self.to_cocoa(frame), true);
         // 投影进一步把贴图与其下方的真实界面区分开
         panel.setHasShadow(true);
         panel.orderFrontRegardless();
         Ok(Box::new(MacPin {
             panel,
             view: RefCell::new(None),
+            toolbar: RefCell::new(None),
+            toolbar_handler: RefCell::new(None),
             primary_height: self.primary_height(),
             mtm: self.mtm,
         }))
@@ -121,7 +129,7 @@ impl Platform for MacPlatform {
 
     fn create_overlay(&self, screen: &ScreenInfo) -> Result<Box<dyn Overlay>> {
         let cocoa = self.to_cocoa(screen.frame);
-        let panel = self.make_panel(cocoa, false);
+        let panel = make_panel(self.mtm, cocoa, false);
         // 背景交给视图绘制（需要在压暗层上镂空选区），窗口本身保持透明
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
 
@@ -155,6 +163,9 @@ struct MacPin {
     panel: Retained<NSPanel>,
     /// 视图在 set_image 时才创建，故用 RefCell 延迟填入。
     view: RefCell<Option<Retained<PinView>>>,
+    /// 工具栏子窗口，进入标注模式时才创建。
+    toolbar: RefCell<Option<(Retained<NSPanel>, Retained<ToolbarView>)>>,
+    toolbar_handler: RefCell<Option<ToolbarHandler>>,
     primary_height: f64,
     mtm: MainThreadMarker,
 }
@@ -249,6 +260,54 @@ impl PinWindow for MacPin {
         }
     }
 
+    fn set_toolbar(&self, items: &[ToolbarItem]) {
+        if items.is_empty() {
+            if let Some((panel, _)) = self.toolbar.borrow_mut().take() {
+                self.panel.removeChildWindow(&panel);
+                panel.close();
+            }
+            return;
+        }
+
+        let mut slot = self.toolbar.borrow_mut();
+        if slot.is_none() {
+            let size = toolbar_size(items.len());
+            let tb = make_panel(self.mtm, NSRect::new(NSPoint::new(0.0, 0.0), size), false);
+            tb.setBackgroundColor(Some(&NSColor::clearColor()));
+            // 层级高于贴图，避免被自身的投影遮住
+            tb.setLevel(OVERLAY_LEVEL + 1);
+            let view = ToolbarView::new(
+                self.mtm,
+                NSRect::new(NSPoint::new(0.0, 0.0), size),
+            );
+            if let Some(h) = self.toolbar_handler.borrow().as_ref() {
+                view.set_handler(h.clone());
+            }
+            tb.setContentView(Some(&view));
+            // 作为子窗口加入，从而随贴图一同移动
+            // SAFETY: tb 由本函数创建且仅由 self.toolbar 持有，
+            // 移除时会先 removeChildWindow 再 close，不会留下悬垂的子窗口
+            unsafe {
+                self.panel
+                    .addChildWindow_ordered(&tb, NSWindowOrderingMode::Above)
+            };
+            tb.orderFrontRegardless();
+            *slot = Some((tb, view));
+        }
+        if let Some((_, view)) = slot.as_ref() {
+            view.set_items(items);
+        }
+        drop(slot);
+        self.reposition_toolbar();
+    }
+
+    fn set_toolbar_handler(&self, handler: ToolbarHandler) {
+        if let Some((_, view)) = self.toolbar.borrow().as_ref() {
+            view.set_handler(handler.clone());
+        }
+        *self.toolbar_handler.borrow_mut() = Some(handler);
+    }
+
     fn is_click_through(&self) -> bool {
         self.view.borrow().as_ref().is_some_and(|v| v.is_click_through())
     }
@@ -264,6 +323,34 @@ impl PinWindow for MacPin {
             .iter()
             .position(|s| s.frame() == on.frame())
             .map(|i| ScreenId(i as u32))
+    }
+}
+
+impl MacPin {
+    /// 把工具栏摆到贴图下方居中；下方空间不足时改置于上方。
+    fn reposition_toolbar(&self) {
+        let Some((tb, _)) = self.toolbar.borrow().as_ref().map(|(a, b)| (a.clone(), b.clone()))
+        else {
+            return;
+        };
+        let pin = self.panel.frame();
+        let size = tb.frame().size;
+        let gap = PADDING;
+        let x = pin.origin.x + (pin.size.width - size.width) / 2.0;
+        let below = pin.origin.y - size.height - gap;
+
+        // Cocoa 的 y 向上，故「下方」是更小的 y。低于所在屏底边则翻到上方。
+        let min_y = self
+            .panel
+            .screen()
+            .map(|s| s.frame().origin.y)
+            .unwrap_or(f64::NEG_INFINITY);
+        let y = if below < min_y {
+            pin.origin.y + pin.size.height + gap
+        } else {
+            below
+        };
+        tb.setFrameOrigin(NSPoint::new(x, y));
     }
 }
 
