@@ -8,6 +8,10 @@ mod macos;
 mod overlay_view;
 #[cfg(target_os = "macos")]
 mod pin_view;
+#[cfg(target_os = "macos")]
+mod image;
+#[cfg(target_os = "macos")]
+mod clipboard;
 
 #[cfg(not(target_os = "macos"))]
 mod unimplemented_backend;
@@ -23,4 +27,15 @@ pub fn current_platform() -> Result<Box<dyn Platform>> {
 #[cfg(not(target_os = "macos"))]
 pub fn current_platform() -> Result<Box<dyn Platform>> {
     Ok(Box::new(unimplemented_backend::StubPlatform))
+}
+
+/// 把图像写入系统剪贴板。
+#[cfg(target_os = "macos")]
+pub fn copy_image_to_clipboard(image: &crate::PinImage<'_>) -> Result<()> {
+    clipboard::copy_image(image)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn copy_image_to_clipboard(_image: &crate::PinImage<'_>) -> Result<()> {
+    Err(crate::Error::Unsupported("clipboard"))
 }

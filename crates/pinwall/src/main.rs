@@ -6,6 +6,8 @@
 //! 尚未接入：标注编辑、历史库、上传工作流。
 
 use std::cell::RefCell;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
@@ -17,10 +19,16 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
 
-use pinwall_capture::{capture_selection, current_capturer, permission_status, Capturer, Permission};
+use pinwall_capture::{
+    capture_selection, current_capturer, encode_png, permission_status, CapturedImage, Capturer,
+    Permission,
+};
 use pinwall_core::{Event, Outcome, Selection, SelectionMachine};
 use pinwall_platform::geom::Rect;
-use pinwall_platform::{current_platform, OverlaySet, PinImage, PinWindow, Platform, PointerEvent};
+use pinwall_platform::{
+    copy_image_to_clipboard, current_platform, OverlaySet, PinImage, PinWindow, Platform,
+    PointerEvent,
+};
 
 fn main() {
     let mtm = MainThreadMarker::new().expect("须在主线程运行");
@@ -53,9 +61,13 @@ fn main() {
     let capture_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
     let clear_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyX);
     let through_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyT);
+    let save_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyS);
+    let copy_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyC);
     manager.register(capture_key).expect("注册 ⌘⇧A 失败");
     manager.register(clear_key).expect("注册 ⌘⇧X 失败");
     manager.register(through_key).expect("注册 ⌘⇧T 失败");
+    manager.register(save_key).expect("注册 ⌘⇧S 失败");
+    manager.register(copy_key).expect("注册 ⌘⇧C 失败");
 
     println!(
         r#"
@@ -64,7 +76,11 @@ PinWall  —— 把截图钉在屏幕上
   ⌘⇧A   截图并贴到屏幕上（拖拽框选，右键取消）
   ⌘⇧X   关闭所有贴图
   ⌘⇧T   切换所有贴图的鼠标穿透
+  ⌘⇧S   把最近一张贴图存到桌面
+  ⌘⇧C   把最近一张贴图复制到剪贴板
   Ctrl-C 退出
+
+截图完成后会自动复制到剪贴板。
 
 贴图上：
   拖拽        移动
@@ -80,7 +96,9 @@ PinWall  —— 把截图钉在屏幕上
     app.finishLaunching();
 
     let rx = GlobalHotKeyEvent::receiver();
-    let mut pins: Vec<Box<dyn PinWindow>> = Vec::new();
+    // 图像与窗口一同保存：存盘与复制都需要原始像素，
+    // 而窗口本身不保留可读回的位图
+    let mut pins: Vec<Pin> = Vec::new();
 
     loop {
         let until = NSDate::dateWithTimeIntervalSinceNow(0.02);
@@ -97,7 +115,7 @@ PinWall  —— 把截图钉在屏幕上
 
         // 回收用户自行关掉的贴图（双击 / 右键）。窗口关闭由用户在窗口上
         // 直接触发，上层无从感知，只能轮询回收，否则 Box 会一直堆着。
-        pins.retain(|p: &Box<dyn PinWindow>| !p.is_closed());
+        pins.retain(|p: &Pin| !p.window.is_closed());
 
         while let Ok(ev) = rx.try_recv() {
             if ev.state != HotKeyState::Pressed {
@@ -106,8 +124,16 @@ PinWall  —— 把截图钉在屏幕上
             if ev.id == capture_key.id() {
                 match capture_and_pin(&app, platform.as_ref(), capturer.as_ref()) {
                     Ok(Some(pin)) => {
+                        // 截图即入剪贴板：多数使用场景下一步就是粘贴，
+                        // 让用户不必再多按一次
+                        match copy_image_to_clipboard(&pin.as_pin_image()) {
+                            Ok(()) => println!(
+                                "已贴图并复制到剪贴板，当前共 {} 张（⌘⇧X 全部关闭）",
+                                pins.len() + 1
+                            ),
+                            Err(e) => println!("已贴图（复制到剪贴板失败: {e}）"),
+                        }
                         pins.push(pin);
-                        println!("已贴图，当前共 {} 张（⌘⇧X 全部关闭）", pins.len());
                     }
                     Ok(None) => println!("已取消"),
                     Err(e) => eprintln!("失败: {e}"),
@@ -115,15 +141,31 @@ PinWall  —— 把截图钉在屏幕上
             } else if ev.id == clear_key.id() {
                 let n = pins.len();
                 for p in pins.drain(..) {
-                    p.close();
+                    p.window.close();
                 }
                 println!("已关闭 {n} 张贴图");
+            } else if ev.id == save_key.id() {
+                match pins.last() {
+                    Some(p) => match save_to_desktop(&p.image) {
+                        Ok(path) => println!("已保存 {}", path.display()),
+                        Err(e) => eprintln!("保存失败: {e}"),
+                    },
+                    None => println!("当前没有贴图可保存"),
+                }
+            } else if ev.id == copy_key.id() {
+                match pins.last() {
+                    Some(p) => match copy_image_to_clipboard(&p.as_pin_image()) {
+                        Ok(()) => println!("已复制最近一张贴图到剪贴板"),
+                        Err(e) => eprintln!("复制失败: {e}"),
+                    },
+                    None => println!("当前没有贴图可复制"),
+                }
             } else if ev.id == through_key.id() {
                 // 以「是否存在未穿透的贴图」决定统一开还是统一关，
                 // 避免逐张取反导致状态参差不齐
-                let turn_on = pins.iter().any(|p| !p.is_click_through());
+                let turn_on = pins.iter().any(|p| !p.window.is_click_through());
                 for p in &pins {
-                    p.set_click_through(turn_on);
+                    p.window.set_click_through(turn_on);
                 }
                 println!(
                     "{} {} 张贴图的鼠标穿透",
@@ -133,6 +175,49 @@ PinWall  —— 把截图钉在屏幕上
             }
         }
     }
+}
+
+
+/// 一张贴图：窗口 + 其原始像素。
+///
+/// 必须同时保存像素 —— 窗口只负责显示，不提供读回位图的通路，
+/// 而存盘与复制到剪贴板都需要原始数据。
+struct Pin {
+    window: Box<dyn PinWindow>,
+    image: CapturedImage,
+}
+
+impl Pin {
+    fn as_pin_image(&self) -> PinImage<'_> {
+        PinImage {
+            width: self.image.width,
+            height: self.image.height,
+            scale: self.image.scale,
+            bgra: &self.image.bgra,
+        }
+    }
+}
+
+/// 把图像存到桌面，文件名带时间戳。
+///
+/// 桌面是 macOS 截图的惯例位置；取不到主目录时退回当前工作目录。
+fn save_to_desktop(img: &CapturedImage) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let dir = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join("Desktop"))
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let mut path = dir.join(format!("PinWall-{stamp}.png"));
+    // 同一秒内连续保存不应互相覆盖
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("PinWall-{stamp}-{n}.png"));
+        n += 1;
+    }
+
+    std::fs::write(&path, encode_png(img)?)?;
+    Ok(path)
 }
 
 /// 走一遍完整流程：铺遮罩 → 等框选 → 捕获 → 贴图。
@@ -152,7 +237,7 @@ fn capture_and_pin(
     app: &NSApplication,
     platform: &dyn Platform,
     capturer: &dyn Capturer,
-) -> Result<Option<Box<dyn PinWindow>>, Box<dyn std::error::Error>> {
+) -> Result<Option<Pin>, Box<dyn std::error::Error>> {
     // 每次都重新枚举 —— 显示器可能在两次截图之间发生热插拔
     let screens = platform.screens()?;
     let overlays = OverlaySet::covering_all_screens(platform)?;
@@ -229,5 +314,5 @@ fn capture_and_pin(
         bgra: &img.bgra,
     })?;
     pin.show();
-    Ok(Some(pin))
+    Ok(Some(Pin { window: pin, image: img }))
 }

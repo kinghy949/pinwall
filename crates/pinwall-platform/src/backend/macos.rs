@@ -8,15 +8,15 @@
 
 use objc2::rc::Retained;
 use std::cell::{Cell, RefCell};
-use objc2::{AnyThread, MainThreadMarker, MainThreadOnly};
+use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSBitmapImageRep, NSColor, NSImage, NSPanel, NSScreen,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSPanel, NSScreen, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use crate::geom::{Point, Rect};
 use super::overlay_view::{OverlayView, OverlayViewIvars};
+use super::image::ns_image_from_bgra;
 use super::pin_view::PinView;
 use crate::{Error, Overlay, PinImage, PinWindow, Platform, PointerHandler, Result, ScreenId, ScreenInfo};
 
@@ -156,47 +156,9 @@ struct MacPin {
 
 impl PinWindow for MacPin {
     fn set_image(&self, image: &PinImage<'_>) -> Result<()> {
-        if image.width == 0 || image.height == 0 {
-            return Err(Error::WindowCreation("图像尺寸为零".into()));
-        }
-        let expected = image.width as usize * image.height as usize * 4;
-        if image.bgra.len() < expected {
-            return Err(Error::WindowCreation(format!(
-                "像素数据长度不足：需要 {expected}，实得 {}",
-                image.bgra.len()
-            )));
-        }
-
-        // NSBitmapImageRep 需要可写的行指针；此处复制一份由 rep 持有。
-        // 直接借用调用方的切片会在其释放后留下悬垂指针。
-        let mut buf = image.bgra.to_vec();
-        let mut plane: *mut u8 = buf.as_mut_ptr();
-
-        let rep = unsafe {
-            NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bitmapFormat_bytesPerRow_bitsPerPixel(
-                NSBitmapImageRep::alloc(),
-                &mut plane as *mut *mut u8,
-                image.width as isize,
-                image.height as isize,
-                8,
-                4,
-                true,
-                false,
-                objc2_app_kit::NSDeviceRGBColorSpace,
-                // BGRA 预乘 alpha、小端序 —— 与捕获层输出格式一致
-                objc2_app_kit::NSBitmapFormat::ThirtyTwoBitLittleEndian
-                    | objc2_app_kit::NSBitmapFormat(0),
-                image.width as isize * 4,
-                32,
-            )
-        }
-        .ok_or_else(|| Error::WindowCreation("创建位图表示失败".into()))?;
-
-        // 逻辑尺寸 = 像素尺寸 / 倍率，这样 Retina 屏上显示为原始大小
+        let ns_image = ns_image_from_bgra(image)?;
         let logical_w = image.width as f64 / image.scale;
         let logical_h = image.height as f64 / image.scale;
-        let ns_image = NSImage::initWithSize(NSImage::alloc(), NSSize::new(logical_w, logical_h));
-        ns_image.addRepresentation(&rep);
 
         let view = PinView::new(
             self.mtm,
@@ -214,8 +176,6 @@ impl PinWindow for MacPin {
             NSRect::new(new_origin, NSSize::new(logical_w, logical_h)),
             true,
         );
-        // rep 已持有自己的像素副本，buf 可安全释放
-        drop(buf);
         Ok(())
     }
 

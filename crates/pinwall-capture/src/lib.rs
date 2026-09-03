@@ -88,6 +88,9 @@ pub enum Permission {
     NotRequired,
 }
 
+mod encode;
+pub use encode::encode_png;
+
 mod compose;
 pub use compose::capture_selection;
 
