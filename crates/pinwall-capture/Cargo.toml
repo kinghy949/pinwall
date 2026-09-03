@@ -1,0 +1,27 @@
+[package]
+name = "pinwall-capture"
+description = "PinWall 的屏幕捕获层"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pinwall-platform = { path = "../pinwall-platform" }
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
+block2 = "0.6"
+objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "CFString", "CFDate"] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGImage", "CGBitmapContext", "CGContext", "CGColorSpace", "CGDataProvider",
+] }
+objc2-screen-capture-kit = { version = "0.3", features = [
+    "SCScreenshotManager", "SCStream", "block2",
+    "objc2-core-foundation", "objc2-core-graphics",
+] }
+
+[dev-dependencies]
+png = "0.18.1"
