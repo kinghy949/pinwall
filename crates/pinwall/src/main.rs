@@ -52,8 +52,10 @@ fn main() {
     let manager = GlobalHotKeyManager::new().expect("热键管理器创建失败");
     let capture_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
     let clear_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyX);
+    let through_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyT);
     manager.register(capture_key).expect("注册 ⌘⇧A 失败");
     manager.register(clear_key).expect("注册 ⌘⇧X 失败");
+    manager.register(through_key).expect("注册 ⌘⇧T 失败");
 
     println!(
         r#"
@@ -61,9 +63,15 @@ PinWall  —— 把截图钉在屏幕上
 
   ⌘⇧A   截图并贴到屏幕上（拖拽框选，右键取消）
   ⌘⇧X   关闭所有贴图
+  ⌘⇧T   切换所有贴图的鼠标穿透
   Ctrl-C 退出
 
-贴图上：拖拽移动，双击或右键关闭
+贴图上：
+  拖拽        移动
+  滚轮        缩放（以光标为锚点）
+  Shift+滚轮  调透明度
+  中键        切换鼠标穿透
+  双击 / 右键 关闭
 
 已就绪。
 "#
@@ -110,6 +118,18 @@ PinWall  —— 把截图钉在屏幕上
                     p.close();
                 }
                 println!("已关闭 {n} 张贴图");
+            } else if ev.id == through_key.id() {
+                // 以「是否存在未穿透的贴图」决定统一开还是统一关，
+                // 避免逐张取反导致状态参差不齐
+                let turn_on = pins.iter().any(|p| !p.is_click_through());
+                for p in &pins {
+                    p.set_click_through(turn_on);
+                }
+                println!(
+                    "{} {} 张贴图的鼠标穿透",
+                    if turn_on { "已开启" } else { "已关闭" },
+                    pins.len()
+                );
             }
         }
     }

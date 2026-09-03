@@ -7,8 +7,13 @@ use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{NSEvent, NSImage, NSView};
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSImage, NSView};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+
+/// 缩放范围。下限保证贴图不会小到点不中，上限避免无意义的糊放大。
+const ZOOM_MIN: f64 = 0.1;
+const ZOOM_MAX: f64 = 8.0;
+const OPACITY_MIN: f64 = 0.1;
 
 pub struct PinViewIvars {
     pub image: RefCell<Option<Retained<NSImage>>>,
@@ -16,6 +21,12 @@ pub struct PinViewIvars {
     pub grab_offset: Cell<Option<NSPoint>>,
     /// 窗口是否已被用户关闭。上层据此回收对应的 PinWindow。
     pub closed: Cell<bool>,
+    /// 100% 时的逻辑尺寸。缩放始终以它为基准计算，
+    /// 而非在当前尺寸上累乘，避免反复缩放后累积误差。
+    pub base_size: Cell<NSSize>,
+    pub zoom: Cell<f64>,
+    pub opacity: Cell<f64>,
+    pub click_through: Cell<bool>,
 }
 
 define_class!(
@@ -60,6 +71,30 @@ define_class!(
             self.close_self();
         }
 
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, _event: &NSEvent) {
+            // 中键切换鼠标穿透。开启后本窗口不再接收任何鼠标事件，
+            // 无法再靠点击自己关掉——故上层须提供全局快捷键兜底。
+            let on = !self.ivars().click_through.get();
+            self.ivars().click_through.set(on);
+            if let Some(w) = self.window() {
+                w.setIgnoresMouseEvents(on);
+            }
+        }
+
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            let dy = event.scrollingDeltaY();
+            if dy == 0.0 {
+                return;
+            }
+            if event.modifierFlags().contains(NSEventModifierFlags::Shift) {
+                self.adjust_opacity(dy);
+            } else {
+                self.adjust_zoom(dy);
+            }
+        }
+
         /// 应用未激活时首次点击也应直接拖动，而不是先激活再点一次。
         #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _event: *mut NSEvent) -> bool {
@@ -82,8 +117,75 @@ impl PinView {
             image: RefCell::new(Some(image)),
             grab_offset: Cell::new(None),
             closed: Cell::new(false),
+            base_size: Cell::new(frame.size),
+            zoom: Cell::new(1.0),
+            opacity: Cell::new(1.0),
+            click_through: Cell::new(false),
         });
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    pub fn is_click_through(&self) -> bool {
+        self.ivars().click_through.get()
+    }
+
+    /// 供上层的全局快捷键调用。鼠标穿透一旦开启，窗口就收不到鼠标事件，
+    /// 无法自行关闭，必须留这条外部通路。
+    pub fn set_click_through(&self, on: bool) {
+        self.ivars().click_through.set(on);
+        if let Some(w) = self.window() {
+            w.setIgnoresMouseEvents(on);
+        }
+    }
+
+    fn adjust_opacity(&self, dy: f64) {
+        let iv = self.ivars();
+        let next = (iv.opacity.get() + dy * 0.01).clamp(OPACITY_MIN, 1.0);
+        iv.opacity.set(next);
+        if let Some(w) = self.window() {
+            w.setAlphaValue(next);
+        }
+    }
+
+    /// 以光标位置为锚点缩放。
+    ///
+    /// 锚点不变是手感的关键：若固定左上角，用户想放大某个细节时
+    /// 那个细节会跑掉，得反复拖回来。
+    fn adjust_zoom(&self, dy: f64) {
+        let iv = self.ivars();
+        let Some(window) = self.window() else { return };
+
+        let base = iv.base_size.get();
+        // 指数步进，使每一格滚轮的视觉变化率一致
+        let next_zoom = (iv.zoom.get() * (1.0 + dy * 0.01)).clamp(ZOOM_MIN, ZOOM_MAX);
+        if (next_zoom - iv.zoom.get()).abs() < f64::EPSILON {
+            return;
+        }
+        iv.zoom.set(next_zoom);
+
+        let old = window.frame();
+        let new_size = NSSize::new(base.width * next_zoom, base.height * next_zoom);
+
+        // 求光标在窗口内的相对位置（0..1），缩放后令其保持不变
+        let mouse = NSEvent::mouseLocation();
+        let rx = if old.size.width > 0.0 {
+            ((mouse.x - old.origin.x) / old.size.width).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        let ry = if old.size.height > 0.0 {
+            ((mouse.y - old.origin.y) / old.size.height).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        let new_origin = NSPoint::new(
+            mouse.x - rx * new_size.width,
+            mouse.y - ry * new_size.height,
+        );
+
+        window.setFrame_display(NSRect::new(new_origin, new_size), true);
+        self.setFrameSize(new_size);
+        self.setNeedsDisplay(true);
     }
 
     pub fn is_closed(&self) -> bool {

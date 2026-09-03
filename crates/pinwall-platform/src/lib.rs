@@ -84,7 +84,12 @@ pub trait PinWindow {
     fn close(self: Box<Self>);
     fn set_opacity(&self, alpha: f64);
     /// 鼠标穿透。开启后窗口不再接收任何鼠标事件，点击会落到其下方的窗口。
+    ///
+    /// **调用方必须提供一条外部通路（如全局快捷键）来关闭它** ——
+    /// 穿透开启后窗口自身收不到点击，无法再靠交互恢复。
     fn set_click_through(&self, enabled: bool);
+
+    fn is_click_through(&self) -> bool;
     fn move_to(&self, origin: Point);
     fn frame(&self) -> Rect;
     /// 当前所在显示器。跨屏拖动后会变化，据此判断是否需要按新倍率重采样。

@@ -236,7 +236,12 @@ impl PinWindow for MacPin {
     }
 
     fn set_click_through(&self, enabled: bool) {
-        self.panel.setIgnoresMouseEvents(enabled);
+        // 经视图设置，使视图内记录的状态与窗口实际行为保持一致；
+        // 直接改窗口会让视图里的中键切换逻辑读到过期状态。
+        match self.view.borrow().as_ref() {
+            Some(v) => v.set_click_through(enabled),
+            None => self.panel.setIgnoresMouseEvents(enabled),
+        }
     }
 
     fn move_to(&self, origin: Point) {
@@ -255,6 +260,10 @@ impl PinWindow for MacPin {
             f.size.width,
             f.size.height,
         )
+    }
+
+    fn is_click_through(&self) -> bool {
+        self.view.borrow().as_ref().is_some_and(|v| v.is_click_through())
     }
 
     fn is_closed(&self) -> bool {
