@@ -6,7 +6,7 @@
 |---|---|---|
 | [`pin-window`](pin-window/) | winit NSWindow 能否覆盖全屏 | **已完成 —— 结论为否** |
 | [`pin-panel`](pin-panel/) | NSPanel + NonactivatingPanel 能否覆盖全屏 | **已完成 —— 通过** |
-| [`annot-editor`](annot-editor/) | egui 矢量标注对象编辑 + 中文 IME | 进行中（IME 待人工验证） |
+| [`annot-editor`](annot-editor/) | egui 矢量标注对象编辑 + 中文 IME | **已完成 —— 全部通过** |
 
 ## pin-window
 

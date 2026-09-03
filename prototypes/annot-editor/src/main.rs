@@ -430,6 +430,20 @@ impl eframe::App for App {
                     o.shape = Shape::Text(text);
                 }
                 if r.lost_focus() {
+                    // 内容为空的文本对象直接丢弃，否则误点会在画布上
+                    // 堆积一堆不可见的空对象
+                    let empty = self
+                        .doc
+                        .objs
+                        .get(i)
+                        .map(|o| matches!(&o.shape, Shape::Text(t) if t.trim().is_empty()))
+                        .unwrap_or(false);
+                    if empty {
+                        self.doc.objs.remove(i);
+                        if self.doc.sel == Some(i) {
+                            self.doc.sel = None;
+                        }
+                    }
                     self.editing = None;
                     self.hist.push(&self.doc);
                 }
