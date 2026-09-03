@@ -141,9 +141,27 @@ egui / iced / slint 都还在快速迭代，API 会变。会有相当比例的�
 
 ## 未能验证（需补做）
 
-**5. 全屏应用之上的浮窗行为 —— 未验证。**
-尝试用 AppleScript 将 TextEdit 置为全屏以自动化测试，两次均失败
-（`AXFullScreen` 设置被静默拒绝，终端未获辅助功能权限）。**此项需人工验证**，且是本原型最关键的一项。
+**5. 全屏应用之上的浮窗行为 —— 已人工验证，结果为否定。**
+
+实测结论（2026-09-03，人工操作）：
+
+> `level = Status(25)` + `collectionBehavior = CanJoinAllSpaces | FullScreenAuxiliary | Stationary`
+> + 默认 `Regular` 激活策略 —— **窗口无法覆盖其他应用的全屏窗口，切入全屏后即不可见。**
+
+这确认了 R5 是真实存在的问题，而非理论顾虑。**它是目前 MVP 最大的未解风险。**
+
+值得注意的是：`FullScreenAuxiliary` 的语义是「允许窗口加入**其所属应用自己**的全屏 Space」，
+它未必适用于覆盖**他人**的全屏窗口。这可能正是失败原因。
+
+后续排查已改为参数矩阵自动轮播（见 `prototypes/pin-window`，每 4 秒切换一组，
+窗口内以黄色方块数量标示组合编号），追加验证三个此前未测的变量：
+1. 更高的窗口层级（PopUpMenu 101 / ScreenSaver 1000 / kCGMaximumWindowLevel）
+2. `NSApplicationActivationPolicy.Accessory`（无 Dock 图标，不强制切换 Space）—— **重点怀疑对象**
+3. 去掉 `FullScreenAuxiliary`、仅保留 `CanJoinAllSpaces`
+
+排查结果待补。若全部组合均失败，则贴图在 macOS 上「覆盖他人全屏应用」这一场景可能需要
+完全不同的实现路径（如 CGShieldingWindowLevel、或接受该场景不支持），
+届时必须重新评估产品定位 —— 因为「盯着全屏的设计稿写代码」正是贴图的典型使用场景。
 
 **6. 多显示器混合 DPI —— 未验证。** 测试机仅一块显示器，无法构造跨屏 DPI 变化场景。
 **此项需在双屏且两屏缩放不同的环境下补测。**
