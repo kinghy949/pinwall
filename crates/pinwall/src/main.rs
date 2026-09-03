@@ -63,6 +63,8 @@ PinWall  —— 把截图钉在屏幕上
   ⌘⇧X   关闭所有贴图
   Ctrl-C 退出
 
+贴图上：拖拽移动，双击或右键关闭
+
 已就绪。
 "#
     );
@@ -84,6 +86,10 @@ PinWall  —— 把截图钉在屏幕上
         } {
             app.sendEvent(&e);
         }
+
+        // 回收用户自行关掉的贴图（双击 / 右键）。窗口关闭由用户在窗口上
+        // 直接触发，上层无从感知，只能轮询回收，否则 Box 会一直堆着。
+        pins.retain(|p: &Box<dyn PinWindow>| !p.is_closed());
 
         while let Ok(ev) = rx.try_recv() {
             if ev.state != HotKeyState::Pressed {

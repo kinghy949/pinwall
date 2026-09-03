@@ -89,6 +89,12 @@ pub trait PinWindow {
     fn frame(&self) -> Rect;
     /// 当前所在显示器。跨屏拖动后会变化，据此判断是否需要按新倍率重采样。
     fn current_screen(&self) -> Option<ScreenId>;
+
+    /// 用户是否已经关掉了这张贴图（双击或右键）。
+    ///
+    /// 窗口的关闭由用户在窗口上直接触发，上层无从得知，
+    /// 故需轮询本方法回收对应的 `PinWindow`，否则会持续累积。
+    fn is_closed(&self) -> bool;
 }
 
 /// 遮罩上的指针事件。坐标均为**全局逻辑坐标**，已由后端换算完毕。

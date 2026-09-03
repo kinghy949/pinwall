@@ -10,13 +10,14 @@ use objc2::rc::Retained;
 use std::cell::{Cell, RefCell};
 use objc2::{AnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSBitmapImageRep, NSColor, NSImage, NSImageView, NSPanel, NSScreen,
+    NSBackingStoreType, NSBitmapImageRep, NSColor, NSImage, NSPanel, NSScreen,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use crate::geom::{Point, Rect};
 use super::overlay_view::{OverlayView, OverlayViewIvars};
+use super::pin_view::PinView;
 use crate::{Error, Overlay, PinImage, PinWindow, Platform, PointerHandler, Result, ScreenId, ScreenInfo};
 
 /// `NSScreenSaverWindowLevel`。实测该层级配合 NonactivatingPanel 可覆盖全屏应用。
@@ -107,6 +108,7 @@ impl Platform for MacPlatform {
         panel.orderFrontRegardless();
         Ok(Box::new(MacPin {
             panel,
+            view: RefCell::new(None),
             primary_height: self.primary_height(),
             mtm: self.mtm,
         }))
@@ -146,6 +148,8 @@ impl Platform for MacPlatform {
 
 struct MacPin {
     panel: Retained<NSPanel>,
+    /// 视图在 set_image 时才创建，故用 RefCell 延迟填入。
+    view: RefCell<Option<Retained<PinView>>>,
     primary_height: f64,
     mtm: MainThreadMarker,
 }
@@ -194,12 +198,13 @@ impl PinWindow for MacPin {
         let ns_image = NSImage::initWithSize(NSImage::alloc(), NSSize::new(logical_w, logical_h));
         ns_image.addRepresentation(&rep);
 
-        let view = NSImageView::initWithFrame(
-            NSImageView::alloc(self.mtm),
+        let view = PinView::new(
+            self.mtm,
             NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(logical_w, logical_h)),
+            ns_image,
         );
-        view.setImage(Some(&ns_image));
         self.panel.setContentView(Some(&view));
+        *self.view.borrow_mut() = Some(view);
 
         // 保持左上角不动地调整尺寸 —— Cocoa 的 origin 在左下角，
         // 直接改 size 会让窗口视觉上向下生长
@@ -250,6 +255,10 @@ impl PinWindow for MacPin {
             f.size.width,
             f.size.height,
         )
+    }
+
+    fn is_closed(&self) -> bool {
+        self.view.borrow().as_ref().is_some_and(|v| v.is_closed())
     }
 
     fn current_screen(&self) -> Option<ScreenId> {

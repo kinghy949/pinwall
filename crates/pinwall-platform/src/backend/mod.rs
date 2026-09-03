@@ -6,6 +6,8 @@ use crate::{Platform, Result};
 mod macos;
 #[cfg(target_os = "macos")]
 mod overlay_view;
+#[cfg(target_os = "macos")]
+mod pin_view;
 
 #[cfg(not(target_os = "macos"))]
 mod unimplemented_backend;
