@@ -23,6 +23,29 @@ impl Point {
     }
 }
 
+impl Point {
+    /// 到原点的距离。两点相减得到的差值可直接用它求距离。
+    pub fn length(&self) -> f64 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
+}
+
+/// 两点相减得到位移量。为避免引入独立的向量类型，位移同样用 [`Point`]
+/// 表示 —— 本项目中二者的运算需求完全一致。
+impl std::ops::Sub for Point {
+    type Output = Point;
+    fn sub(self, rhs: Point) -> Point {
+        Point::new(self.x - rhs.x, self.y - rhs.y)
+    }
+}
+
+impl std::ops::Add for Point {
+    type Output = Point;
+    fn add(self, rhs: Point) -> Point {
+        Point::new(self.x + rhs.x, self.y + rhs.y)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Size {
     pub width: f64,
