@@ -85,12 +85,19 @@ define_class!(
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             let dy = event.scrollingDeltaY();
-            if dy == 0.0 {
-                return;
-            }
-            if event.modifierFlags().contains(NSEventModifierFlags::Shift) {
-                self.adjust_opacity(dy);
-            } else {
+            let dx = event.scrollingDeltaX();
+            let flags = event.modifierFlags();
+
+            // macOS 会把 Shift+滚轮**转换成横向滚动**，此时 deltaY 恒为 0、
+            // 值跑到 deltaX 上。只读 deltaY 会导致 Shift 组合完全失效。
+            if flags.contains(NSEventModifierFlags::Shift)
+                || flags.contains(NSEventModifierFlags::Option)
+            {
+                let delta = if dy != 0.0 { dy } else { dx };
+                if delta != 0.0 {
+                    self.adjust_opacity(delta);
+                }
+            } else if dy != 0.0 {
                 self.adjust_zoom(dy);
             }
         }
