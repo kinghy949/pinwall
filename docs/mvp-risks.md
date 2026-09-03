@@ -111,3 +111,48 @@ egui / iced / slint 都还在快速迭代，API 会变。会有相当比例的�
 3. **热路径延迟实测**（约 1–2 天）——快捷键 → 遮罩首帧是否能进 50ms。达不到就得重新审视 GUI 方案。
 
 三个原型都通过，再开始写正式代码。
+
+---
+
+# 附：原型 1 实测结论
+
+> 2026-09-03。代码见 [`prototypes/pin-window`](../prototypes/pin-window/)。
+> 实测环境：macOS 26.5.1、Rust 1.97-nightly、winit 0.30.13、softbuffer 0.4.8、objc2-app-kit 0.3.2。
+> **单显示器（2940×1912 @ scale 2）**。
+
+## 已验证通过
+
+**1. Rust 路线可行，无需自己写 FFI。**
+经 `winit` 取 `RawWindowHandle::AppKit` → `NSView::window()` 可直达 `NSWindow`，
+`setLevel` / `setCollectionBehavior` / `setAlphaValue` / `setIgnoresMouseEvents` 全部可用，
+且在 objc2-app-kit 0.3.2 中**已是 safe API**，无需 unsafe 块。这消除了「Rust 做贴图要写大量 FFI」的顾虑。
+
+**2. 无边框浮窗渲染正确。** 窗口无任何系统装饰，边框完整，可按任意物理坐标定位。
+
+**3. 按物理像素渲染，不糊。** 测试图案中 1 物理像素宽的交替细线在 2x 屏上根根分明，
+未被系统缩放模糊 —— 说明 winit + softbuffer 的渲染走的是物理像素路径，符合贴图对清晰度的要求。
+
+## 发现的问题
+
+**4. 启动时会收到一次「假的」DPI 变化事件。**
+实测在窗口创建后立刻收到 `ScaleFactorChanged { 2 -> 2 }`，前后值完全相同。
+产品代码若直接在该事件里触发贴图重采样，会造成无谓的重绘。
+**结论：必须对 scale factor 做前后值比对去重，不能无条件响应该事件。**
+
+## 未能验证（需补做）
+
+**5. 全屏应用之上的浮窗行为 —— 未验证。**
+尝试用 AppleScript 将 TextEdit 置为全屏以自动化测试，两次均失败
+（`AXFullScreen` 设置被静默拒绝，终端未获辅助功能权限）。**此项需人工验证**，且是本原型最关键的一项。
+
+**6. 多显示器混合 DPI —— 未验证。** 测试机仅一块显示器，无法构造跨屏 DPI 变化场景。
+**此项需在双屏且两屏缩放不同的环境下补测。**
+
+**7. Windows 侧全部未验证。** 已给出 `WS_EX_LAYERED` / `WS_EX_TRANSPARENT` / `HWND_TOPMOST`
+的对照实现，但测试机为 macOS，代码未经编译与运行验证。
+
+## 当前判断
+
+原型 1 的**技术可行性部分已通过**：Rust 能干净地拿到并操控原生窗口属性，渲染精度达标。
+但**风险 R5（全屏 Space 层级）尚未被证伪或证实**，它仍是 MVP 的首要未知项，
+在人工补测完成前，不应据此开始写产品代码。
