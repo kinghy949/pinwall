@@ -6,6 +6,7 @@
 |---|---|---|
 | [`pin-window`](pin-window/) | winit NSWindow 能否覆盖全屏 | **已完成 —— 结论为否** |
 | [`pin-panel`](pin-panel/) | NSPanel + NonactivatingPanel 能否覆盖全屏 | **已完成 —— 通过** |
+| [`annot-editor`](annot-editor/) | egui 矢量标注对象编辑 + 中文 IME | 进行中（IME 待人工验证） |
 
 ## pin-window
 
@@ -49,3 +50,18 @@ cd prototypes/pin-panel && cargo build --release
 
 与 `pin-window` 的唯一差别是窗口类型（NSPanel vs NSWindow），
 level / collectionBehavior / bundle 配置完全一致 —— 这构成单变量对照。
+
+
+## annot-editor
+
+验证 R3：egui 作为 immediate mode 框架，能否承载持久化矢量标注对象；以及中文输入是否可用。
+
+```bash
+cd prototypes/annot-editor && cargo run
+```
+
+工具栏选「矩形 / 箭头 / 文字」在画布拖拽创建；「选择」工具下可点选、拖动、
+拖角handle缩放、双击文本再编辑；⌘Z / ⌘⇧Z 撤销重做。
+
+**中文输入验证**：选「文字」工具在画布点一下，切到中文输入法打字，
+观察候选词窗位置、拼音上屏、退格删词是否正常。
