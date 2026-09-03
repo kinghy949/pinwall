@@ -60,6 +60,41 @@ impl ScreenInfo {
     }
 }
 
+/// RGBA 颜色，各分量 0..1。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rgba {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+    pub a: f64,
+}
+
+impl Rgba {
+    pub const fn new(r: f64, g: f64, b: f64, a: f64) -> Self {
+        Self { r, g, b, a }
+    }
+}
+
+/// 一条绘制指令。
+///
+/// 窗口层只认这些基本图元，不理解「标注」的语义 ——
+/// 标注模型在 `pinwall-core`，而它依赖本 crate 的几何类型，
+/// 反向依赖会成环。故由应用层做翻译：核心层产出标注对象，
+/// 应用层转成绘制指令，窗口层照着画。
+///
+/// 坐标为**贴图局部逻辑点**（图像左上角为原点，y 向下）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum DrawCommand {
+    Rect { rect: Rect, color: Rgba, width: f64 },
+    Arrow { from: Point, to: Point, color: Rgba, width: f64 },
+    Text { origin: Point, text: String, color: Rgba, size: f64 },
+    /// 对该区域做马赛克遮蔽。像素处理由窗口层完成，
+    /// 因为只有它持有底图。
+    Redact { rect: Rect },
+    /// 选中态的虚线框与两个角手柄。
+    SelectionBox { rect: Rect },
+}
+
 /// 一张待贴出的位图，像素格式为 BGRA8。
 ///
 /// 定义在此处而非捕获层，是为了让窗口层不必反向依赖捕获层；
@@ -77,6 +112,20 @@ pub struct PinImage<'a> {
 pub trait PinWindow {
     /// 设置窗口显示的图像。窗口尺寸会按图像的逻辑尺寸调整。
     fn set_image(&self, image: &PinImage<'_>) -> Result<()>;
+
+    /// 设置叠加在图像之上的绘制指令。传空切片即清除。
+    fn set_draw_commands(&self, commands: &[DrawCommand]);
+
+    /// 进入/退出标注模式。
+    ///
+    /// 标注模式下拖拽用于绘制图形而非移动窗口，指针事件转交回调；
+    /// 退出后恢复为拖拽移动。
+    fn set_annotation_mode(&self, enabled: bool);
+
+    fn is_annotation_mode(&self) -> bool;
+
+    /// 设置标注模式下的指针事件回调，坐标为贴图局部逻辑点。
+    fn set_pointer_handler(&self, handler: PointerHandler);
 
     fn show(&self);
     fn hide(&self);

@@ -18,7 +18,10 @@ use crate::geom::{Point, Rect};
 use super::overlay_view::{OverlayView, OverlayViewIvars};
 use super::image::ns_image_from_bgra;
 use super::pin_view::PinView;
-use crate::{Error, Overlay, PinImage, PinWindow, Platform, PointerHandler, Result, ScreenId, ScreenInfo};
+use crate::{
+    DrawCommand, Error, Overlay, PinImage, PinWindow, Platform, PointerHandler, Result, ScreenId,
+    ScreenInfo,
+};
 
 /// `NSScreenSaverWindowLevel`。实测该层级配合 NonactivatingPanel 可覆盖全屏应用。
 const OVERLAY_LEVEL: isize = 1000;
@@ -222,6 +225,28 @@ impl PinWindow for MacPin {
             f.size.width,
             f.size.height,
         )
+    }
+
+    fn set_draw_commands(&self, commands: &[DrawCommand]) {
+        if let Some(v) = self.view.borrow().as_ref() {
+            v.set_commands(commands);
+        }
+    }
+
+    fn set_annotation_mode(&self, enabled: bool) {
+        if let Some(v) = self.view.borrow().as_ref() {
+            v.set_annotating(enabled);
+        }
+    }
+
+    fn is_annotation_mode(&self) -> bool {
+        self.view.borrow().as_ref().is_some_and(|v| v.is_annotating())
+    }
+
+    fn set_pointer_handler(&self, handler: PointerHandler) {
+        if let Some(v) = self.view.borrow().as_ref() {
+            v.set_handler(handler);
+        }
     }
 
     fn is_click_through(&self) -> bool {

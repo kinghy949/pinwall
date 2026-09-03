@@ -23,11 +23,12 @@ use pinwall_capture::{
     capture_selection, current_capturer, encode_png, permission_status, CapturedImage, Capturer,
     Permission,
 };
+use pinwall_core::annotation::{AnnotationEditor, EditEvent, EditOutcome, Shape, Tool};
 use pinwall_core::{Event, Outcome, Selection, SelectionMachine};
 use pinwall_platform::geom::Rect;
 use pinwall_platform::{
-    copy_image_to_clipboard, current_platform, OverlaySet, PinImage, PinWindow, Platform,
-    PointerEvent,
+    copy_image_to_clipboard, current_platform, DrawCommand, OverlaySet, PinImage, PinWindow,
+    Platform, PointerEvent, Rgba,
 };
 
 fn main() {
@@ -63,11 +64,24 @@ fn main() {
     let through_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyT);
     let save_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyS);
     let copy_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyC);
+    let annotate_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyE);
+    let undo_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyZ);
+    let tool_keys = [
+        (HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Digit1), Tool::Select),
+        (HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Digit2), Tool::Rect),
+        (HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Digit3), Tool::Arrow),
+        (HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Digit4), Tool::Redact),
+    ];
     manager.register(capture_key).expect("注册 ⌘⇧A 失败");
     manager.register(clear_key).expect("注册 ⌘⇧X 失败");
     manager.register(through_key).expect("注册 ⌘⇧T 失败");
     manager.register(save_key).expect("注册 ⌘⇧S 失败");
     manager.register(copy_key).expect("注册 ⌘⇧C 失败");
+    manager.register(annotate_key).expect("注册 ⌘⇧E 失败");
+    manager.register(undo_key).expect("注册 ⌘⇧Z 失败");
+    for (k, _) in &tool_keys {
+        manager.register(*k).expect("注册工具快捷键失败");
+    }
 
     println!(
         r#"
@@ -78,7 +92,12 @@ PinWall  —— 把截图钉在屏幕上
   ⌘⇧T   切换所有贴图的鼠标穿透
   ⌘⇧S   把最近一张贴图存到桌面
   ⌘⇧C   把最近一张贴图复制到剪贴板
+  ⌘⇧E   在最近一张贴图上进出标注模式
+  ⌘⇧Z   撤销标注
   Ctrl-C 退出
+
+标注模式下：⌘⇧1 选择  ⌘⇧2 矩形  ⌘⇧3 箭头  ⌘⇧4 打码
+            拖拽绘制，右键删除选中
 
 截图完成后会自动复制到剪贴板。
 
@@ -117,6 +136,14 @@ PinWall  —— 把截图钉在屏幕上
         // 直接触发，上层无从感知，只能轮询回收，否则 Box 会一直堆着。
         pins.retain(|p: &Pin| !p.window.is_closed());
 
+        // 驱动处于标注模式的贴图
+        for pin in pins.iter_mut() {
+            if pin.pump_annotation() {
+                let cmds = pin.draw_commands();
+                pin.window.set_draw_commands(&cmds);
+            }
+        }
+
         while let Ok(ev) = rx.try_recv() {
             if ev.state != HotKeyState::Pressed {
                 continue;
@@ -144,6 +171,34 @@ PinWall  —— 把截图钉在屏幕上
                     p.window.close();
                 }
                 println!("已关闭 {n} 张贴图");
+            } else if ev.id == annotate_key.id() {
+                match pins.last_mut() {
+                    Some(p) => {
+                        let on = !p.window.is_annotation_mode();
+                        p.window.set_annotation_mode(on);
+                        println!(
+                            "{}标注模式（⌘⇧1 选择 / ⌘⇧2 矩形 / ⌘⇧3 箭头 / ⌘⇧4 打码，右键删除选中）",
+                            if on { "已进入" } else { "已退出" }
+                        );
+                    }
+                    None => println!("当前没有贴图"),
+                }
+            } else if ev.id == undo_key.id() {
+                if let Some(p) = pins.last_mut() {
+                    if p.editor.undo() {
+                        let cmds = p.draw_commands();
+                        p.window.set_draw_commands(&cmds);
+                    }
+                }
+            } else if let Some((_, tool)) = tool_keys.iter().find(|(k, _)| ev.id == k.id()) {
+                if let Some(p) = pins.last_mut() {
+                    // 文字工具需原生输入控件，尚未接入，故未占用快捷键位
+                    let t = *tool;
+                    p.editor.set_tool(t);
+                    let cmds = p.draw_commands();
+                    p.window.set_draw_commands(&cmds);
+                    println!("工具: {t:?}");
+                }
             } else if ev.id == save_key.id() {
                 match pins.last() {
                     Some(p) => match save_to_desktop(&p.image) {
@@ -185,6 +240,12 @@ PinWall  —— 把截图钉在屏幕上
 struct Pin {
     window: Box<dyn PinWindow>,
     image: CapturedImage,
+    editor: AnnotationEditor,
+    /// 标注模式下的指针事件队列。
+    ///
+    /// 与遮罩同理：回调若直接驱动编辑器，就要捕获对编辑器的共享引用，
+    /// 既构成循环也带来嵌套借用风险。改为只入队、主循环消费。
+    events: Rc<RefCell<VecDeque<PointerEvent>>>,
 }
 
 impl Pin {
@@ -195,6 +256,68 @@ impl Pin {
             scale: self.image.scale,
             bgra: &self.image.bgra,
         }
+    }
+
+    /// 把标注模型翻译成窗口层认识的绘制指令。
+    ///
+    /// 这层翻译是必要的：标注模型在 pinwall-core，而它依赖
+    /// pinwall-platform 的几何类型，窗口层无法反向依赖它。
+    fn draw_commands(&self) -> Vec<DrawCommand> {
+        let mut out = Vec::with_capacity(self.editor.objects().len() + 1);
+        for o in self.editor.objects() {
+            let color = Rgba::new(o.color.r, o.color.g, o.color.b, o.color.a);
+            out.push(match &o.shape {
+                Shape::Rect => DrawCommand::Rect { rect: o.bounds(), color, width: o.width },
+                Shape::Arrow => DrawCommand::Arrow {
+                    from: o.a,
+                    to: o.b,
+                    color,
+                    width: o.width,
+                },
+                Shape::Redact => DrawCommand::Redact { rect: o.bounds() },
+                Shape::Text(t) => DrawCommand::Text {
+                    origin: o.a,
+                    text: t.clone(),
+                    color,
+                    size: 18.0,
+                },
+            });
+        }
+        if let Some(i) = self.editor.selected() {
+            if let Some(o) = self.editor.objects().get(i) {
+                out.push(DrawCommand::SelectionBox { rect: o.bounds() });
+            }
+        }
+        out
+    }
+
+    /// 消费队列中的指针事件，返回是否需要重绘。
+    fn pump_annotation(&mut self) -> bool {
+        let mut dirty = false;
+        loop {
+            let next = self.events.borrow_mut().pop_front();
+            let Some(ev) = next else { break };
+            let outcome = match ev {
+                PointerEvent::Down(p) => self.editor.handle(EditEvent::Down(p)),
+                PointerEvent::Moved(p) => self.editor.handle(EditEvent::Move(p)),
+                PointerEvent::Up(p) => self.editor.handle(EditEvent::Up(p)),
+                // 标注模式下右键用于删除选中对象
+                PointerEvent::Cancel => {
+                    if self.editor.delete_selected() {
+                        EditOutcome::Redraw
+                    } else {
+                        EditOutcome::Idle
+                    }
+                }
+            };
+            match outcome {
+                EditOutcome::Redraw => dirty = true,
+                // 文字输入需要原生输入控件，尚未接入
+                EditOutcome::BeginTextInput(_) => dirty = true,
+                EditOutcome::Idle => {}
+            }
+        }
+        dirty
     }
 }
 
@@ -314,5 +437,19 @@ fn capture_and_pin(
         bgra: &img.bgra,
     })?;
     pin.show();
-    Ok(Some(Pin { window: pin, image: img }))
+    // 标注事件队列在建窗时就装好，进入标注模式时无需再改回调
+    let events: Rc<RefCell<VecDeque<PointerEvent>>> = Rc::new(RefCell::new(VecDeque::new()));
+    {
+        let q = events.clone();
+        pin.set_pointer_handler(Rc::new(move |ev: PointerEvent| {
+            q.borrow_mut().push_back(ev);
+        }));
+    }
+
+    Ok(Some(Pin {
+        window: pin,
+        image: img,
+        editor: AnnotationEditor::new(),
+        events,
+    }))
 }

@@ -23,6 +23,8 @@ pub enum Tool {
     Select,
     Rect,
     Arrow,
+    /// 打码遮蔽。
+    Redact,
     Text,
 }
 
