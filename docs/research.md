@@ -13,7 +13,7 @@
 | 4 | Lightshot | Windows, macOS | 免费 | 否 | 极简极快，按键即框选标注分享 |
 | 5 | Greenshot | Windows（macOS 版收费） | 免费 | 是 | 轻量老牌，多捕获模式与导出目标 |
 
-其他值得关注：Shottr（macOS 免费原生，社区口碑好）、Awesome Screenshot（浏览器整页截图）、Windows Snipping Tool（系统自带）、Gyazo（截完秒出分享链接）、Monosnap、Droplr。
+其他值得关注：**Snipaste（三平台，贴图功能是其杀手锏，见下方补充调研）**、Shottr（macOS 免费原生，社区口碑好）、Awesome Screenshot（浏览器整页截图）、Windows Snipping Tool（系统自带）、Gyazo（截完秒出分享链接）、Monosnap、Droplr。
 
 ## 逐个拆解
 
@@ -57,13 +57,48 @@
 
 **结论**：轻量是优点，但"轻"不该以过时的交互为代价。
 
-## 对 Snapzen 的启示
+## 补充调研：Snipaste / Raycast / Paste
 
-1. **跨平台一致性是最大的空白**：五款里没有一款在三平台上都好用且免费。这是切入点。
-2. **能力与易用不必二选一**：ShareX 证明了能力上限，CleanShot X 证明了体验上限，没人同时做到。
-3. **默认路径必须极快**：向 Lightshot 看齐，高级功能不能拖慢基础操作。
-4. **本地优先，云可自建**：避开 Lightshot 的隐私争议和 CleanShot 的云绑定。
-5. **不设付费墙**：这是开源项目相对商业产品最直接的差异化。
+> 2026-09-02 追加。第一轮调研遗漏了 Snipaste，而它是对本项目最重要的参考对象。
+
+### Snipaste —— 最重要的参考对象
+
+**核心信息**（核实自官网 snipaste.com，注意 `snipastepro.com.cn`、`snipaste.ijinshan.com` 等均为仿冒站，信息不可信）：
+
+- 平台：Windows（x64 / x86 / ARM64）、macOS（Universal）、**Linux（AppImage x86_64）** —— 三平台俱全
+- 当前版本 2.11.x，2.10.x 系列有密集的迭代记录，维护活跃
+- 技术栈：**Qt**（其 GitHub 组织下有 `Snipaste/qt`、`Snipaste/qt-patches` 两个仓库佐证），并非某些站点所称的 Electron
+- 授权：个人使用免费；**自 2.0 起商业使用需付费许可**（$8.99 / 1 设备，$19.99 / 3 设备）
+- 闭源，GitHub 上仅开放 `feedback`（★3.6k）与 `translations` 仓库
+
+**杀手锏 —— 贴图（Pin to screen）**：截图后按 F3，把剪贴板内容（图片、文本、颜色值、HTML）变成一个**置顶浮动窗口"贴"在屏幕上**。对照参考、临时比对、盯着设计稿写代码这类场景，体验碾压"截图存文件再打开"的传统路径。
+
+**这是前五名全都没有的能力。** ShareX、Snagit、CleanShot X、Lightshot、Greenshot 无一提供，而它恰恰是 Snipaste 用户黏性最高的功能。
+
+**Snipaste 尚未覆盖的**：捕获后工作流与自定义上传目标、滚动长截图、OCR、录屏 / GIF、可搜索的历史库。Linux 端以 AppImage 分发，Wayland 下的表现需实测。
+
+### Raycast —— 不是截图工具，但架构值得抄
+
+macOS 起家的键盘优先启动器，现已支持 Windows 10/11。免费版 + Pro（$8/月起）。内置剪贴板历史（文本 / 图片 / 颜色 / 链接，可 pin），免费版保留 3 个月，更长需 Pro。
+
+**值得借鉴的是它的扩展生态模型**：官方只做核心，上传目标、集成、小工具由社区以扩展形式提供，扩展用 TS/Swift/Python/Bash 编写。这直接给出了"如何拥有 ShareX 那样几十种上传目标，却不必自己全写一遍"的答案。
+
+### Paste —— 剪贴板历史的 UX 标杆
+
+macOS / iOS 剪贴板管理器，$3.99/月。把每一条复制记录做成**可视化卡片时间线**，支持 pinboard 分类、全局搜索、iCloud 跨设备同步。
+
+**值得借鉴的是历史库的呈现方式**：Snapzen 的截图历史如果做成卡片时间线而非文件列表，检索效率会高一个量级。
+
+## 对 Snapzen 的启示（已根据补充调研修订）
+
+1. ~~跨平台一致性是最大的空白~~ —— **此结论有误，已作废**。Snipaste 已经覆盖 Windows / macOS / Linux 三平台。平台覆盖不是差异化点。
+2. **贴图必须是一等公民**：这是前五名集体缺失、而 Snipaste 用户最离不开的能力。Snapzen 若没有贴图，对 Snipaste 用户就没有迁移理由。
+3. **真正的空白是"贴图 × 工作流"的交集**：Snipaste 有贴图但没有自动化上传与滚动截图；ShareX 有工作流但没有贴图且只有 Windows。没有产品同时提供两者。
+4. **商用免费是最实在的差异化**：Snipaste 个人免费但商用要买许可。一个 MIT 协议、公司可直接部署的替代品，价值明确。
+5. **靠扩展生态覆盖长尾**：学 Raycast，核心只做捕获 / 标注 / 贴图 / 历史，上传目标与集成交给插件 API。
+6. **能力与易用不必二选一**：ShareX 证明了能力上限，CleanShot X 证明了体验上限，没人同时做到。
+7. **默认路径必须极快**：向 Lightshot 与 Snipaste 看齐，高级功能不能拖慢基础操作。
+8. **本地优先，云可自建**：避开 Lightshot 的隐私争议和 CleanShot 的云绑定。
 
 ## 资料来源
 
