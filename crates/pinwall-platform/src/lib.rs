@@ -109,6 +109,46 @@ pub struct ToolbarItem {
 /// 工具栏点击回调，参数为被点按钮的 `id`。
 pub type ToolbarHandler = std::rc::Rc<dyn Fn(u32)>;
 
+/// 贴图窗口内的一次按键。
+///
+/// 窗口层不理解「哪个键对应哪个工具」—— 与 [`DrawCommand`]、[`ToolbarItem`] 同理，
+/// 语义映射留给应用层，标注模型不能被窗口层反向依赖。
+///
+/// # 为什么按键要走窗口而不是全局热键
+///
+/// 全局热键会从**所有**应用手里抢走那个键位，还会撞上系统保留的组合
+/// （macOS 的 ⌘⇧3/4/5 归它自己的截图功能，且 `register()` 照样返回成功，
+/// 失效得毫无征兆）。竞品一律把工具键做成窗口内按键，只在窗口有焦点时生效。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPress {
+    /// 不带修饰键的可打印字符，字母已转小写。空格即 `' '`。
+    Plain(char),
+    /// ⌘ + 可打印字符，字母已转小写。
+    Command(char),
+    /// ⌘⇧ + 可打印字符，字母已转小写。
+    ///
+    /// 与 [`Self::Command`] 分开是必需的：`charactersIgnoringModifiers` 对
+    /// ⌘S 与 ⌘⇧S 给出的是同一个字母，不看修饰键就分不出「存储为」和「快速保存」。
+    CommandShift(char),
+    Escape,
+}
+
+/// 窗口内按键的回调。
+pub type KeyHandler = std::rc::Rc<dyn Fn(KeyPress)>;
+
+/// 正在进行的文字输入的一份状态快照。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextInput {
+    pub text: String,
+    /// 该内容实际占据的尺寸（贴图局部逻辑点，与当前缩放无关）。
+    ///
+    /// 字体度量只有平台层有，故由本层测好回传 ——
+    /// 标注模型据此确定文字的包围盒。
+    pub extent: geom::Size,
+    /// 用户是否已结束输入（回车、点击画面别处、或输入框被收走）。
+    pub finished: bool,
+}
+
 /// 一张待贴出的位图，像素格式为 BGRA8。
 ///
 /// 定义在此处而非捕获层，是为了让窗口层不必反向依赖捕获层；
@@ -147,6 +187,32 @@ pub trait PinWindow {
     fn set_toolbar(&self, items: &[ToolbarItem]);
 
     fn set_toolbar_handler(&self, handler: ToolbarHandler);
+
+    /// 在贴图上就地弹出**平台原生**的文本输入框。
+    ///
+    /// `rect` 为贴图局部逻辑点，`font_size` 为 100% 缩放下的字号。
+    ///
+    /// 必须用原生控件：自行实现预编辑与候选词等于重写一遍输入法，
+    /// 中日韩用户会在第一次打字时就发现。
+    fn begin_text_input(&self, rect: Rect, initial: &str, font_size: f64, color: Rgba);
+
+    /// 轮询输入框的当前内容。无输入进行中时返回 `None`。
+    ///
+    /// 用轮询而非回调，与本层其他状态（[`Self::is_closed`]）保持一致：
+    /// 回调要么捕获上层状态而构成循环引用，要么还得再加一层消息队列。
+    fn poll_text_input(&self) -> Option<TextInput>;
+
+    /// 收起输入框。内容的去留由上层决定，本层只负责撤掉控件。
+    fn end_text_input(&self);
+
+    /// 设置窗口内按键的回调。
+    ///
+    /// **只在窗口取得键盘焦点时触发** —— 这正是要点：工具键不再常驻全局，
+    /// 不会从别的应用手里抢走 V、R、空格这些再普通不过的键。
+    ///
+    /// 代价是点击贴图会让本应用变为活跃应用。这是取舍后的结果，
+    /// 也是 Snipaste 等竞品的一致做法。
+    fn set_key_handler(&self, handler: KeyHandler);
 
     fn show(&self);
     fn hide(&self);
@@ -288,4 +354,4 @@ impl OverlaySet {
 }
 
 mod backend;
-pub use backend::{copy_image_to_clipboard, current_platform, flatten_annotations};
+pub use backend::{ask_save_path, copy_image_to_clipboard, current_platform, flatten_annotations};

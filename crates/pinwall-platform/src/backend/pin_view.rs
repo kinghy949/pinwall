@@ -6,18 +6,30 @@
 use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSGraphicsContext, NSImage, NSView};
+use objc2::runtime::{AnyObject, Bool};
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+use objc2_app_kit::{
+    NSApplication, NSColor, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont,
+    NSFontAttributeName, NSGraphicsContext, NSImage, NSStringDrawing, NSTextField, NSView,
+};
 use objc2_core_graphics::CGContext;
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_foundation::{MainThreadMarker, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
 use super::annot_draw::{self, inset};
-use crate::{DrawCommand, PointerEvent, PointerHandler};
+use crate::geom::{Rect, Size};
+use crate::{DrawCommand, KeyHandler, KeyPress, PointerEvent, PointerHandler, Rgba, TextInput};
 
 /// 缩放范围。下限保证贴图不会小到点不中，上限避免无意义的糊放大。
 const ZOOM_MIN: f64 = 0.1;
 const ZOOM_MAX: f64 = 8.0;
 const OPACITY_MIN: f64 = 0.1;
+
+/// 输入框相对文字锚点的左移量。NSTextField 会给文字留一点内边距，
+/// 不抵消掉，输入时看到的位置就与提交后画出来的位置错开几个点 ——
+/// 而「所见即所得」正是就地输入的全部意义。
+const FIELD_INSET: f64 = 2.0;
+/// 输入框在内容之外多留的宽度，供光标停靠。
+const FIELD_SLACK: f64 = 8.0;
 
 
 pub struct PinViewIvars {
@@ -37,6 +49,19 @@ pub struct PinViewIvars {
     pub zoom: Cell<f64>,
     pub opacity: Cell<f64>,
     pub click_through: Cell<bool>,
+    /// 正在编辑文字时的原生输入框。
+    pub text_field: RefCell<Option<Retained<NSTextField>>>,
+    /// 该文字对象的锚点（**图像原始坐标**）与 100% 缩放下的字号。
+    pub text_anchor: Cell<Option<(crate::geom::Point, f64)>>,
+    /// 用户已明确结束输入（回车，或点击了画面别处）。
+    pub text_done: Cell<bool>,
+    /// 窗口内按键的回调。
+    pub key_handler: RefCell<Option<KeyHandler>>,
+    /// 输入框是否曾真正拿到过焦点。
+    ///
+    /// 少了这一位，创建当帧「还没有字段编辑器」就会被误判成「已失焦」，
+    /// 输入框刚弹出就自己关掉。
+    pub text_focused: Cell<bool>,
 }
 
 define_class!(
@@ -52,6 +77,14 @@ define_class!(
     impl PinView {
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            // 先取键盘焦点：工具键、空格、⌘Z 全部由本窗口消费，没有焦点就收不到
+            self.focus_window();
+            // 文字输入进行中：点击画面别处即为提交，而不是顺手再开一个新文字框。
+            // 落在输入框自身范围内的点击根本到不了这里，由输入框先行接管。
+            if self.ivars().text_field.borrow().is_some() {
+                self.ivars().text_done.set(true);
+                return;
+            }
             if self.ivars().annotating.get() {
                 self.emit(PointerEvent::Down(self.local_point(event)));
                 return;
@@ -136,6 +169,57 @@ define_class!(
             true
         }
 
+        /// 贴图要接收按键，就必须能成为第一响应者。NSView 默认返回 false。
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            // 文字输入进行中时按键属于输入框。正常情况下按键根本到不了这里
+            // （第一响应者是字段编辑器），留这道判断是防着焦点错乱。
+            if self.ivars().text_field.borrow().is_some() {
+                return;
+            }
+            let Some(press) = key_press_from(event) else { return };
+            let handler = self.ivars().key_handler.borrow().clone();
+            if let Some(h) = handler {
+                h(press);
+            }
+        }
+
+        /// 吞掉按键的默认处理，免得未识别的键触发系统提示音。
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> Bool {
+            // ⌘ 组合走的是 key equivalent 通路而非 keyDown:，须单独接住
+            if self.ivars().text_field.borrow().is_some() {
+                return Bool::NO;
+            }
+            let press = match key_press_from(event) {
+                Some(p @ (KeyPress::Command(_) | KeyPress::CommandShift(_))) => p,
+                _ => return Bool::NO,
+            };
+            let handler = self.ivars().key_handler.borrow().clone();
+            match handler {
+                Some(h) => {
+                    h(press);
+                    Bool::YES
+                }
+                None => Bool::NO,
+            }
+        }
+
+        /// 输入框的 action：用户按下回车。
+        ///
+        /// 由本视图直接充当 target，省掉一个只为转发一次回调而存在的
+        /// delegate 对象。NSControl 的 target 是不持有的弱引用，
+        /// 而输入框是本视图的子视图，生命周期严格更短，不会悬垂。
+        #[unsafe(method(pinwallTextCommitted:))]
+        fn text_committed(&self, _sender: *mut AnyObject) {
+            self.ivars().text_done.set(true);
+        }
+
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
             let bounds = self.bounds();
@@ -161,6 +245,11 @@ impl PinView {
             zoom: Cell::new(1.0),
             opacity: Cell::new(1.0),
             click_through: Cell::new(false),
+            text_field: RefCell::new(None),
+            text_anchor: Cell::new(None),
+            text_done: Cell::new(false),
+            text_focused: Cell::new(false),
+            key_handler: RefCell::new(None),
         });
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
@@ -194,6 +283,12 @@ impl PinView {
     fn adjust_zoom(&self, dy: f64) {
         let iv = self.ivars();
         let Some(window) = self.window() else { return };
+
+        // 缩放会改变输入框该有的位置与字号。与其同步这一堆状态，
+        // 不如就此提交 —— 打字打到一半去滚滚轮本就少见。
+        if iv.text_field.borrow().is_some() {
+            iv.text_done.set(true);
+        }
 
         let base = iv.base_size.get();
         // 指数步进，使每一格滚轮的视觉变化率一致
@@ -235,6 +330,11 @@ impl PinView {
     }
 
     pub fn set_annotating(&self, on: bool) {
+        if !on {
+            // 退出标注模式时输入框必须一并收走，否则它会孤零零地悬在贴图上，
+            // 而此时已经没人在轮询它了
+            self.end_text_input();
+        }
         self.ivars().annotating.set(on);
         // 退出标注模式时清掉半途的拖拽状态，否则下次点击会误判为继续拖动
         self.ivars().grab_offset.set(None);
@@ -247,6 +347,31 @@ impl PinView {
 
     pub fn set_handler(&self, handler: PointerHandler) {
         *self.ivars().handler.borrow_mut() = Some(handler);
+    }
+
+    pub fn set_key_handler(&self, handler: KeyHandler) {
+        *self.ivars().key_handler.borrow_mut() = Some(handler);
+    }
+
+    /// 让本窗口取得键盘焦点。
+    ///
+    /// 必须连带激活本应用：系统只把键盘事件投递给当前活跃的应用，
+    /// 光让窗口成为 key window 是不够的。代价是点击贴图会抢走用户
+    /// 原本应用的焦点 —— 这是把工具键从全局热键里摘出来所必须付的账，
+    /// 也是 Snipaste 一类竞品的一致做法。
+    fn focus_window(&self) {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let Some(w) = self.window() else { return };
+        if !w.isKeyWindow() {
+            // 见 begin_text_input 中同样的注释：不能用 macOS 14 才有的 activate()
+            #[allow(deprecated)]
+            NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+            w.makeKeyAndOrderFront(None);
+        }
+        // 文字输入进行中时第一响应者归输入框，不要抢回来
+        if self.ivars().text_field.borrow().is_none() {
+            w.makeFirstResponder(Some(self));
+        }
     }
 
     /// 缩放后重新摆放子窗口（工具栏）。
@@ -267,6 +392,126 @@ impl PinView {
             let y = pin.origin.y - size.height - 5.0;
             child.setFrameOrigin(NSPoint::new(x, y));
         }
+    }
+
+    /// 就地弹出原生输入框。
+    ///
+    /// `rect` 与 `font_size` 均为**图像原始坐标/字号**，按当前缩放换算后落位。
+    pub fn begin_text_input(&self, rect: Rect, initial: &str, font_size: f64, color: Rgba) {
+        // 上一个输入框若还在，先收掉；同一时刻只允许编辑一个文字对象
+        self.end_text_input();
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let iv = self.ivars();
+        let z = iv.zoom.get().max(f64::EPSILON);
+
+        let field = NSTextField::initWithFrame(
+            NSTextField::alloc(mtm),
+            self.field_frame(rect, z, font_size),
+        );
+        field.setStringValue(&NSString::from_str(initial));
+        field.setFont(Some(&NSFont::systemFontOfSize(font_size * z)));
+        field.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            color.r, color.g, color.b, color.a,
+        )));
+        // 去掉一切边框与聚焦环，让输入框尽量接近文字最终的样子；
+        // 但保留浅色底 —— 红字落在深色截图上会看不见自己在打什么
+        field.setBezeled(false);
+        field.setBordered(false);
+        field.setDrawsBackground(true);
+        field.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            1.0, 1.0, 1.0, 0.88,
+        )));
+        field.setFocusRingType(NSFocusRingType::None);
+        field.setEditable(true);
+        field.setSelectable(true);
+        unsafe {
+            field.setTarget(Some(self));
+            field.setAction(Some(sel!(pinwallTextCommitted:)));
+        }
+        self.addSubview(&field);
+
+        // 键盘焦点。本应用是 Accessory 策略（无 Dock 图标、不出现在 ⌘Tab 中），
+        // 激活它不改变用户的窗口布局；而不激活就拿不到按键事件 ——
+        // 系统只把键盘事件投递给当前活跃的应用。
+        if let Some(w) = self.window() {
+            // 用 activateIgnoringOtherApps 而非 macOS 14 才有的 activate()：
+            // 本项目的下限由 ScreenCaptureKit 定在 12.3，在 12/13 上调
+            // activate() 会因选择子不存在直接崩掉。等下限抬到 14 再换。
+            #[allow(deprecated)]
+            NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+            w.makeKeyAndOrderFront(None);
+            w.makeFirstResponder(Some(&field));
+        }
+        let _ = mtm;
+
+        iv.text_anchor.set(Some((rect.origin, font_size)));
+        iv.text_done.set(false);
+        iv.text_focused.set(false);
+        *iv.text_field.borrow_mut() = Some(field);
+        self.setNeedsDisplay(true);
+    }
+
+    /// 读取输入框当前内容。无输入进行中时返回 `None`。
+    pub fn poll_text_input(&self) -> Option<TextInput> {
+        let iv = self.ivars();
+        let field = iv.text_field.borrow().clone()?;
+        let z = iv.zoom.get().max(f64::EPSILON);
+        let text = field.stringValue().to_string();
+
+        // 按实际字体度量文字占多大，供上层确定包围盒
+        let measured = measure(&text, field.font().as_deref());
+        // 输入框随内容加宽，否则超出初始宽度的字会滚出可视区，
+        // 用户只能看见自己刚打的最后几个字
+        let want = measured.width + FIELD_SLACK;
+        let frame = field.frame();
+        if want > frame.size.width {
+            field.setFrameSize(NSSize::new(want, frame.size.height));
+        }
+
+        // 拿到过焦点之后又失去 —— 说明用户点去了别处，视同提交
+        let editing = field.currentEditor().is_some();
+        if editing {
+            iv.text_focused.set(true);
+        }
+        let finished = iv.text_done.get() || (iv.text_focused.get() && !editing);
+
+        Some(TextInput {
+            text,
+            extent: Size::new(measured.width / z, measured.height / z),
+            finished,
+        })
+    }
+
+    /// 收起输入框。内容的去留由上层决定，此处只撤掉控件。
+    pub fn end_text_input(&self) {
+        let iv = self.ivars();
+        let field = iv.text_field.borrow_mut().take();
+        if let Some(f) = field {
+            if let Some(w) = self.window() {
+                // 先交还第一响应者，否则字段编辑器会连着一个已被移除的视图
+                w.makeFirstResponder(None);
+            }
+            f.removeFromSuperview();
+        }
+        iv.text_anchor.set(None);
+        iv.text_done.set(false);
+        iv.text_focused.set(false);
+        self.setNeedsDisplay(true);
+    }
+
+    /// 输入框在视图局部坐标（Cocoa 左下原点）下的位置。
+    fn field_frame(&self, rect: Rect, z: f64, font_size: f64) -> NSRect {
+        let view_h = self.bounds().size.height;
+        // 行高按字号估算，保证输入框至少装得下一行字
+        let h = (rect.size.height * z).max(font_size * z * 1.4);
+        let w = (rect.size.width * z).max(font_size * z * 4.0);
+        NSRect::new(
+            NSPoint::new(
+                rect.origin.x * z - FIELD_INSET,
+                view_h - rect.origin.y * z - h,
+            ),
+            NSSize::new(w, h),
+        )
     }
 
     fn emit(&self, event: PointerEvent) {
@@ -335,5 +580,51 @@ impl PinView {
         if let Some(w) = self.window() {
             w.orderOut(None);
         }
+    }
+}
+
+/// 用给定字体量出文字占据的尺寸（视图坐标，即已含当前缩放）。
+///
+/// 与工具栏用的是同一套 `sizeWithAttributes:` —— 也与 `annot_draw`
+/// 最终绘制文字所用的度量一致，两处若各自估算，包围盒就会与字对不齐。
+fn measure(text: &str, font: Option<&NSFont>) -> NSSize {
+    let Some(font) = font else { return NSSize::new(0.0, 0.0) };
+    let s = NSString::from_str(text);
+    let attrs = NSDictionary::from_slices(
+        &[unsafe { NSFontAttributeName }],
+        &[font as &AnyObject],
+    );
+    unsafe { s.sizeWithAttributes(Some(&attrs)) }
+}
+
+/// 把 Cocoa 的按键事件翻成 [`KeyPress`]。不关心的组合返回 `None`。
+///
+/// 用 `charactersIgnoringModifiers` 而非 `characters`：后者在按住 ⌘ 或切到
+/// 非拉丁输入法时给出的字符会变，工具键会随输入法失灵。
+fn key_press_from(event: &NSEvent) -> Option<KeyPress> {
+    /// Esc 的虚拟键码。它没有可打印字符，只能按键码认。
+    const KEYCODE_ESCAPE: u16 = 53;
+    if event.keyCode() == KEYCODE_ESCAPE {
+        return Some(KeyPress::Escape);
+    }
+    let flags = event.modifierFlags();
+    // 带 ⌃ / ⌥ 的组合一律不接，留给系统和输入法
+    if flags.contains(NSEventModifierFlags::Control)
+        || flags.contains(NSEventModifierFlags::Option)
+    {
+        return None;
+    }
+    let chars = event.charactersIgnoringModifiers()?;
+    let c = chars.to_string().chars().next()?.to_ascii_lowercase();
+    if flags.contains(NSEventModifierFlags::Command) {
+        if flags.contains(NSEventModifierFlags::Shift) {
+            Some(KeyPress::CommandShift(c))
+        } else {
+            Some(KeyPress::Command(c))
+        }
+    } else if c.is_control() {
+        None
+    } else {
+        Some(KeyPress::Plain(c))
     }
 }

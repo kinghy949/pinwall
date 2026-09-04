@@ -5,6 +5,10 @@ use crate::{Platform, Result};
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
+mod panel;
+#[cfg(target_os = "macos")]
+mod save_panel;
+#[cfg(target_os = "macos")]
 mod overlay_view;
 #[cfg(target_os = "macos")]
 mod pin_view;
@@ -44,6 +48,19 @@ pub fn copy_image_to_clipboard(image: &crate::PinImage<'_>) -> Result<()> {
 #[cfg(not(target_os = "macos"))]
 pub fn copy_image_to_clipboard(_image: &crate::PinImage<'_>) -> Result<()> {
     Err(crate::Error::Unsupported("clipboard"))
+}
+
+/// 弹出系统「存储为」对话框，返回用户选定的路径。取消返回 `None`。
+///
+/// **必须在主线程调用，且会阻塞到用户关闭对话框。**
+#[cfg(target_os = "macos")]
+pub fn ask_save_path(suggested_name: &str) -> Option<std::path::PathBuf> {
+    save_panel::ask_save_path(suggested_name)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn ask_save_path(_suggested_name: &str) -> Option<std::path::PathBuf> {
+    None
 }
 
 /// 把标注烧进图像，返回新的 BGRA8 数据（尺寸不变）。

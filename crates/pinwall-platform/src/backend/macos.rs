@@ -8,7 +8,7 @@
 
 use objc2::rc::Retained;
 use std::cell::{Cell, RefCell};
-use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSPanel, NSScreen, NSWindowCollectionBehavior,
     NSWindowOrderingMode, NSWindowStyleMask,
@@ -17,12 +17,13 @@ use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use crate::geom::{Point, Rect};
 use super::overlay_view::{OverlayView, OverlayViewIvars};
+use super::panel::KeyablePanel;
 use super::image::ns_image_from_bgra;
 use super::pin_view::PinView;
 use super::toolbar_view::{toolbar_size, ToolbarView, PADDING};
 use crate::{
-    DrawCommand, Error, Overlay, PinImage, PinWindow, Platform, PointerHandler, Result, ScreenId,
-    ScreenInfo, ToolbarHandler, ToolbarItem,
+    DrawCommand, Error, KeyHandler, Overlay, PinImage, PinWindow, Platform, PointerHandler,
+    Result, Rgba, ScreenId, ScreenInfo, TextInput, ToolbarHandler, ToolbarItem,
 };
 
 /// `NSScreenSaverWindowLevel`。实测该层级配合 NonactivatingPanel 可覆盖全屏应用。
@@ -74,13 +75,14 @@ impl MacPlatform {
 /// 按原型 1 的结论构造面板：NSPanel + NonactivatingPanel。
 /// 贴图、遮罩、工具栏共用同一套窗口属性。
 fn make_panel(mtm: MainThreadMarker, cocoa_frame: NSRect, opaque: bool) -> Retained<NSPanel> {
-    let panel: Retained<NSPanel> = NSPanel::initWithContentRect_styleMask_backing_defer(
-        NSPanel::alloc(mtm),
+    // 用 KeyablePanel 而非 NSPanel：无边框窗口默认拿不到键盘焦点，
+    // 文字标注需要它（见 `panel.rs`）
+    let panel: Retained<NSPanel> = KeyablePanel::make(
+        mtm,
         cocoa_frame,
         // NonactivatingPanel 是能覆盖他人全屏窗口的结构前提
         NSWindowStyleMask::NonactivatingPanel | NSWindowStyleMask::Borderless,
         NSBackingStoreType::Buffered,
-        false,
     );
     panel.setFloatingPanel(true);
     panel.setHidesOnDeactivate(false);
@@ -299,6 +301,28 @@ impl PinWindow for MacPin {
         }
         drop(slot);
         self.reposition_toolbar();
+    }
+
+    fn begin_text_input(&self, rect: Rect, initial: &str, font_size: f64, color: Rgba) {
+        if let Some(v) = self.view.borrow().as_ref() {
+            v.begin_text_input(rect, initial, font_size, color);
+        }
+    }
+
+    fn poll_text_input(&self) -> Option<TextInput> {
+        self.view.borrow().as_ref()?.poll_text_input()
+    }
+
+    fn end_text_input(&self) {
+        if let Some(v) = self.view.borrow().as_ref() {
+            v.end_text_input();
+        }
+    }
+
+    fn set_key_handler(&self, handler: KeyHandler) {
+        if let Some(v) = self.view.borrow().as_ref() {
+            v.set_key_handler(handler);
+        }
     }
 
     fn set_toolbar_handler(&self, handler: ToolbarHandler) {

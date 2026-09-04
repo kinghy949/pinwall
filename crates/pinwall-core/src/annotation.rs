@@ -9,7 +9,7 @@
 //! 本模块使用**贴图局部坐标**：原点在图像左上角，y 向下，单位为逻辑点。
 //! 这样标注随贴图一起移动、缩放时无需重算，只在渲染时乘以缩放系数。
 
-use pinwall_platform::geom::{Point, Rect};
+use pinwall_platform::geom::{Point, Rect, Size};
 
 /// 命中判定的容差（逻辑点）。细线条若严格按几何判定会极难点中。
 const HIT_TOLERANCE: f64 = 6.0;
@@ -17,6 +17,10 @@ const HIT_TOLERANCE: f64 = 6.0;
 const MIN_SIZE: f64 = 3.0;
 /// 缩放手柄的抓取半径。
 const HANDLE_RADIUS: f64 = 7.0;
+/// 文字对象包围盒的下限。空文字仍需一块可点中的区域，否则删不掉。
+const MIN_TEXT_SIZE: Size = Size::new(12.0, 14.0);
+/// 新建文字对象时输入框的初始大小。内容超出后由平台层实测值接管。
+const TEXT_BOX_HINT: Size = Size::new(160.0, 24.0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -245,12 +249,22 @@ impl AnnotationEditor {
         self.doc.objects.is_empty()
     }
 
-    /// 修改指定文字对象的内容。由平台的文本输入控件回调。
-    pub fn set_text(&mut self, index: usize, text: String) {
-        if let Some(o) = self.doc.objects.get_mut(index) {
-            if matches!(o.shape, Shape::Text(_)) {
-                o.shape = Shape::Text(text);
-            }
+    /// 修改指定文字对象的内容，`extent` 为该内容实际占据的尺寸。
+    ///
+    /// 尺寸必须由平台层实测后回传 —— 本层不含任何字体度量，
+    /// 无从知道一串文字有多宽。包围盒不准的直接后果是：
+    /// 用户打完字，却既选不中也拖不动自己刚写的那行。
+    pub fn set_text(&mut self, index: usize, text: String, extent: Option<Size>) {
+        let Some(o) = self.doc.objects.get_mut(index) else { return };
+        if !matches!(o.shape, Shape::Text(_)) {
+            return;
+        }
+        o.shape = Shape::Text(text);
+        if let Some(e) = extent {
+            o.b = Point::new(
+                o.a.x + e.width.max(MIN_TEXT_SIZE.width),
+                o.a.y + e.height.max(MIN_TEXT_SIZE.height),
+            );
         }
     }
 
@@ -340,7 +354,7 @@ impl AnnotationEditor {
                 self.doc.objects.push(Annotation {
                     shape: Shape::Text(String::new()),
                     a: p,
-                    b: Point::new(p.x + 160.0, p.y + 24.0),
+                    b: Point::new(p.x + TEXT_BOX_HINT.width, p.y + TEXT_BOX_HINT.height),
                     color: self.color,
                     width: self.width,
                 });
@@ -575,10 +589,40 @@ mod tests {
         let EditOutcome::BeginTextInput(i) = e.handle(EditEvent::Down(p(20.0, 20.0))) else {
             panic!("应请求文本输入");
         };
-        e.set_text(i, "重点在这里".into());
+        e.set_text(i, "重点在这里".into(), None);
         e.finish_text(i);
         assert_eq!(e.objects().len(), 1);
         assert_eq!(e.objects()[0].shape, Shape::Text("重点在这里".into()));
+    }
+
+    /// 文字的包围盒来自平台实测：不采纳它，刚打完的字就选不中也拖不动。
+    #[test]
+    fn measured_extent_becomes_text_bounds() {
+        let mut e = AnnotationEditor::new();
+        e.set_tool(Tool::Text);
+        let EditOutcome::BeginTextInput(i) = e.handle(EditEvent::Down(p(20.0, 20.0))) else {
+            panic!("应请求文本输入");
+        };
+        e.set_text(i, "abc".into(), Some(Size::new(42.0, 21.0)));
+        e.finish_text(i);
+        assert_eq!(e.objects()[0].bounds(), Rect::from_xywh(20.0, 20.0, 42.0, 21.0));
+
+        e.set_tool(Tool::Select);
+        e.handle(EditEvent::Down(p(40.0, 30.0)));
+        assert_eq!(e.selected(), Some(0), "包围盒内应能命中");
+    }
+
+    /// 极窄的实测值（如只打了一个空格）不能让包围盒缩到点不中。
+    #[test]
+    fn tiny_extent_is_floored() {
+        let mut e = AnnotationEditor::new();
+        e.set_tool(Tool::Text);
+        let EditOutcome::BeginTextInput(i) = e.handle(EditEvent::Down(p(0.0, 0.0))) else {
+            panic!("应请求文本输入");
+        };
+        e.set_text(i, "l".into(), Some(Size::new(1.0, 2.0)));
+        let b = e.objects()[i].bounds();
+        assert!(b.size.width >= MIN_TEXT_SIZE.width && b.size.height >= MIN_TEXT_SIZE.height);
     }
 
     #[test]

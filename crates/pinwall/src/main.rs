@@ -2,9 +2,9 @@
 //!
 //! 当前实现的闭环：
 //!   全局热键 → 每屏遮罩 → 框选（可跨屏）→ 分屏捕获并拼接 → 贴为置顶浮窗
-//!   → 标注（工具栏 / 快捷键）→ 烧进像素后存盘或复制
+//!   → 标注（工具栏 / 快捷键，文字走原生输入框）→ 烧进像素后存盘或复制
 //!
-//! 尚未接入：文字工具（需原生输入控件）、历史库、上传工作流。
+//! 尚未接入：历史库、上传工作流。
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -28,8 +28,8 @@ use pinwall_core::annotation::{AnnotationEditor, EditEvent, EditOutcome, Shape, 
 use pinwall_core::{Event, Outcome, Selection, SelectionMachine};
 use pinwall_platform::geom::Rect;
 use pinwall_platform::{
-    copy_image_to_clipboard, current_platform, flatten_annotations, DrawCommand, OverlaySet,
-    PinImage, PinWindow, Platform, PointerEvent, Rgba, ToolbarItem,
+    ask_save_path, copy_image_to_clipboard, current_platform, flatten_annotations, DrawCommand,
+    KeyPress, OverlaySet, PinImage, PinWindow, Platform, PointerEvent, Rgba, ToolbarItem,
 };
 
 fn main() {
@@ -59,56 +59,58 @@ fn main() {
         }
     };
 
+    // 全局热键只留下真正需要「从任何地方进入」的那几个。工具键、撤销、
+    // 存盘、复制一律改由贴图窗口自己消费（见 [`Pin::pump_keys`]）。
+    //
+    // 全局热键有两笔代价：它会从**所有**应用手里独占那个键位；而撞上系统
+    // 保留组合时（macOS 的 ⌘⇧3/4/5 归它自己的截图功能）`register()` 仍然
+    // 返回成功，快捷键静悄悄失效，启动时毫无征兆。竞品（Snipaste、
+    // CleanShot X）一律只把「捕获」放在全局，其余都是窗口内按键。
     let manager = GlobalHotKeyManager::new().expect("热键管理器创建失败");
-    let capture_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
+    // F1 对齐 Snipaste 的默认截图键
+    let capture_key = HotKey::new(None, Code::F1);
     let clear_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyX);
+    // 鼠标穿透**必须**留在全局：穿透开启后窗口既收不到鼠标也收不到按键，
+    // 没有这条外部通路就再也关不掉了
     let through_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyT);
-    let save_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyS);
-    let copy_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyC);
+    // 标注模式的保底通路。正常应按空格（窗口内），但万一贴图窗口拿不到
+    // 键盘焦点，没有它就完全进不去标注模式 —— 而工具栏只在标注模式下才出现。
     let annotate_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyE);
-    let undo_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyZ);
-    let tool_keys = [
-        (HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Digit1), Tool::Select),
-        (HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Digit2), Tool::Rect),
-        (HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Digit3), Tool::Arrow),
-        (HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Digit4), Tool::Redact),
-    ];
-    manager.register(capture_key).expect("注册 ⌘⇧A 失败");
+    manager.register(capture_key).expect("注册 F1 失败");
     manager.register(clear_key).expect("注册 ⌘⇧X 失败");
     manager.register(through_key).expect("注册 ⌘⇧T 失败");
-    manager.register(save_key).expect("注册 ⌘⇧S 失败");
-    manager.register(copy_key).expect("注册 ⌘⇧C 失败");
     manager.register(annotate_key).expect("注册 ⌘⇧E 失败");
-    manager.register(undo_key).expect("注册 ⌘⇧Z 失败");
-    for (k, _) in &tool_keys {
-        manager.register(*k).expect("注册工具快捷键失败");
-    }
 
     println!(
         r#"
 PinWall  —— 把截图钉在屏幕上
 
-  ⌘⇧A   截图并贴到屏幕上（拖拽框选，右键取消）
+全局快捷键（在任何地方都生效）
+  F1     截图并贴到屏幕上（拖拽框选，右键取消）
   ⌘⇧X   关闭所有贴图
   ⌘⇧T   切换所有贴图的鼠标穿透
-  ⌘⇧S   把最近一张贴图存到桌面（含标注）
-  ⌘⇧C   把最近一张贴图复制到剪贴板（含标注）
-  ⌘⇧E   在最近一张贴图上进出标注模式
-  ⌘⇧Z   撤销标注
+  ⌘⇧E   进出标注模式（正常用空格，这是拿不到焦点时的保底通路）
   Ctrl-C 退出
 
-标注模式下会在贴图下方浮出工具栏，可直接点击切换工具；
-也可用 ⌘⇧1 选择  ⌘⇧2 矩形  ⌘⇧3 箭头  ⌘⇧4 打码。
-拖拽绘制，右键删除选中。
+贴图窗口内（先点一下贴图使其取得焦点）
+  空格   显隐标注工具栏（进出标注模式）
+  V      选择      R  矩形      A  箭头
+  B      打码      T  文字
+  ⌘Z     撤销标注
+  ⌘C     复制到剪贴板（含标注）
+  ⌘S     存储为…（弹对话框选位置，含标注）
+  ⌘⇧S    快速保存到桌面（不打断，含标注）
+  Esc    标注模式下退出标注；否则关闭该贴图
 
-截图完成后会自动复制到剪贴板。
-
-贴图上：
   拖拽        移动
   滚轮        缩放（以光标为锚点）
   Shift+滚轮  调透明度（Option+滚轮亦可）
   中键        切换鼠标穿透
   双击 / 右键 关闭
+
+标注模式下贴图下方会浮出工具栏，可直接点击切换工具，不依赖键盘。
+文字工具：点一下即就地弹出输入框（支持输入法），回车或点别处提交。
+拖拽绘制，右键删除选中。截图完成后会自动复制到剪贴板。
 
 已就绪。
 "#
@@ -120,6 +122,9 @@ PinWall  —— 把截图钉在屏幕上
     // 图像与窗口一同保存：存盘与复制都需要原始像素，
     // 而窗口本身不保留可读回的位图
     let mut pins: Vec<Pin> = Vec::new();
+    // 复用缓冲区，避免每帧分配
+    let mut actions: Vec<(usize, PinAction)> = Vec::new();
+    let mut closing: Vec<usize> = Vec::new();
 
     loop {
         let until = NSDate::dateWithTimeIntervalSinceNow(0.02);
@@ -139,16 +144,77 @@ PinWall  —— 把截图钉在屏幕上
         pins.retain(|p: &Pin| !p.window.is_closed());
 
         // 驱动处于标注模式的贴图
-        for pin in pins.iter_mut() {
+        for (i, pin) in pins.iter_mut().enumerate() {
             if let Some(id) = pin.pending_tool.take() {
                 if let Some(t) = Pin::tool_from_id(id) {
                     pin.editor.set_tool(t);
                     pin.refresh();
                 }
             }
-            if pin.pump_annotation() {
+            // 三个 pump 都要跑，不能短路 —— 指针那步可能刚弹出输入框，
+            // 文字那步要把用户已经打进去的字取回来
+            let (kdirty, acts) = pin.pump_keys();
+            let dirty = pin.pump_annotation() | pin.pump_text() | kdirty;
+            if dirty {
                 pin.refresh();
             }
+            for a in acts {
+                actions.push((i, a));
+            }
+        }
+
+        // 按键触发的外部动作单独处理：它们要动到贴图集合或文件系统，
+        // 在遍历 pins 的过程中做不了
+        for (i, a) in actions.drain(..) {
+            match a {
+                PinAction::SaveAs => {
+                    let r = pins[i].export_image().and_then(|img| {
+                        match ask_save_path(&default_file_name()) {
+                            Some(path) => {
+                                std::fs::write(&path, encode_png(&img)?)?;
+                                Ok(Some(path))
+                            }
+                            None => Ok(None),
+                        }
+                    });
+                    match r {
+                        Ok(Some(path)) => println!("已保存 {}", path.display()),
+                        Ok(None) => println!("已取消保存"),
+                        Err(e) => eprintln!("保存失败: {e}"),
+                    }
+                }
+                PinAction::QuickSave => {
+                    match pins[i].export_image().and_then(|img| save_to_desktop(&img)) {
+                        Ok(path) => println!("已保存 {}", path.display()),
+                        Err(e) => eprintln!("保存失败: {e}"),
+                    }
+                }
+                PinAction::Copy => {
+                    let r = pins[i].export_image().and_then(|img| {
+                        copy_image_to_clipboard(&PinImage {
+                            width: img.width,
+                            height: img.height,
+                            scale: img.scale,
+                            bgra: &img.bgra,
+                        })
+                        .map_err(Into::into)
+                    });
+                    match r {
+                        Ok(()) => println!("已复制到剪贴板（含标注）"),
+                        Err(e) => eprintln!("复制失败: {e}"),
+                    }
+                }
+                // 倒序删除，否则前面的删除会让后面的下标失效
+                PinAction::Close => closing.push(i),
+            }
+        }
+        if !closing.is_empty() {
+            closing.sort_unstable();
+            closing.dedup();
+            for i in closing.drain(..).rev() {
+                pins.remove(i).window.close();
+            }
+            println!("已关闭贴图，当前剩 {} 张", pins.len());
         }
 
         while let Ok(ev) = rx.try_recv() {
@@ -182,55 +248,13 @@ PinWall  —— 把截图钉在屏幕上
                 match pins.last_mut() {
                     Some(p) => {
                         let on = !p.window.is_annotation_mode();
-                        p.window.set_annotation_mode(on);
-                        if on {
-                            p.window.set_toolbar(&p.toolbar_items());
-                        } else {
-                            p.window.set_toolbar(&[]);
-                        }
+                        p.set_annotation_mode(on);
                         println!(
-                            "{}标注模式（工具栏可点击，或用 ⌘⇧1~4；右键删除选中）",
+                            "{}标注模式（工具栏可点击，或用 V/R/A/B/T；右键删除选中）",
                             if on { "已进入" } else { "已退出" }
                         );
                     }
                     None => println!("当前没有贴图"),
-                }
-            } else if ev.id == undo_key.id() {
-                if let Some(p) = pins.last_mut() {
-                    if p.editor.undo() {
-                        p.refresh();
-                    }
-                }
-            } else if let Some((_, tool)) = tool_keys.iter().find(|(k, _)| ev.id == k.id()) {
-                if let Some(p) = pins.last_mut() {
-                    // 文字工具需原生输入控件，尚未接入，故未占用快捷键位
-                    p.editor.set_tool(*tool);
-                    p.refresh();
-                    println!("工具: {tool:?}");
-                }
-            } else if ev.id == save_key.id() {
-                match pins.last() {
-                    Some(p) => match p.export_image().and_then(|img| save_to_desktop(&img)) {
-                        Ok(path) => println!("已保存 {}", path.display()),
-                        Err(e) => eprintln!("保存失败: {e}"),
-                    },
-                    None => println!("当前没有贴图可保存"),
-                }
-            } else if ev.id == copy_key.id() {
-                match pins.last() {
-                    Some(p) => match p.export_image().and_then(|img| {
-                        copy_image_to_clipboard(&PinImage {
-                            width: img.width,
-                            height: img.height,
-                            scale: img.scale,
-                            bgra: &img.bgra,
-                        })
-                        .map_err(Into::into)
-                    }) {
-                        Ok(()) => println!("已复制最近一张贴图到剪贴板（含标注）"),
-                        Err(e) => eprintln!("复制失败: {e}"),
-                    },
-                    None => println!("当前没有贴图可复制"),
                 }
             } else if ev.id == through_key.id() {
                 // 以「是否存在未穿透的贴图」决定统一开还是统一关，
@@ -250,6 +274,24 @@ PinWall  —— 把截图钉在屏幕上
 }
 
 
+/// 窗口内按键里，需要交回主循环处理的那部分。
+///
+/// 这几件事都要动到贴图集合本身或文件系统，[`Pin`] 自己做不了 ——
+/// 它拿不到 `pins`，也不该拿到。
+enum PinAction {
+    /// 弹出系统对话框选择保存位置（⌘S）。
+    SaveAs,
+    /// 直接存进快速目录，不打断用户（⌘⇧S）。
+    QuickSave,
+    Copy,
+    Close,
+}
+
+/// 标注文字的字号（100% 缩放下的逻辑点）。
+///
+/// 输入框与最终绘制必须用同一个值，否则提交的瞬间字会跳一下大小。
+const TEXT_FONT_SIZE: f64 = 18.0;
+
 /// 一张贴图：窗口 + 其原始像素。
 ///
 /// 必须同时保存像素 —— 窗口只负责显示，不提供读回位图的通路，
@@ -263,6 +305,15 @@ struct Pin {
     /// 与指针事件同理：回调不能直接改编辑器（会捕获共享引用而成环），
     /// 只记录待处理项，由主循环消费。
     pending_tool: Rc<Cell<Option<u32>>>,
+    /// 正在用原生输入框编辑的文字对象下标。
+    editing_text: Option<usize>,
+    /// 上一次取回的文字内容，用来避免每帧无谓重绘。
+    editing_last: String,
+    /// 窗口内按键的队列。
+    ///
+    /// 与指针事件同理：回调不能直接驱动编辑器，否则要捕获对它的共享引用，
+    /// 既成环也有嵌套借用的风险。只入队，由主循环消费。
+    keys: Rc<RefCell<VecDeque<KeyPress>>>,
     /// 标注模式下的指针事件队列。
     ///
     /// 与遮罩同理：回调若直接驱动编辑器，就要捕获对编辑器的共享引用，
@@ -285,7 +336,7 @@ impl Pin {
     /// 这层翻译是必要的：标注模型在 pinwall-core，而它依赖
     /// pinwall-platform 的几何类型，窗口层无法反向依赖它。
     fn draw_commands(&self) -> Vec<DrawCommand> {
-        self.commands(true)
+        self.commands(true, true)
     }
 
     /// 导出用的指令：不含选中框。
@@ -293,12 +344,19 @@ impl Pin {
     /// 选中框是**编辑期的提示**，不是画面的一部分。烧进导出图里
     /// 就成了一个谁也解释不清的蓝框。
     fn export_commands(&self) -> Vec<DrawCommand> {
-        self.commands(false)
+        // 正在编辑的文字**要**导出：用户看得见自己刚打的字，
+        // 此刻按下 ⌘⇧S 却存出一张没有那行字的图，只会以为存错了
+        self.commands(false, false)
     }
 
-    fn commands(&self, include_selection: bool) -> Vec<DrawCommand> {
+    /// `skip_editing` 只在**画到屏幕上**时为真：那一份由原生输入框自己显示，
+    /// 再画一遍就成了两份对不齐的重影。导出时没有输入框，必须照常画。
+    fn commands(&self, include_selection: bool, skip_editing: bool) -> Vec<DrawCommand> {
         let mut out = Vec::with_capacity(self.editor.objects().len() + 1);
-        for o in self.editor.objects() {
+        for (i, o) in self.editor.objects().iter().enumerate() {
+            if skip_editing && self.editing_text == Some(i) {
+                continue;
+            }
             let color = Rgba::new(o.color.r, o.color.g, o.color.b, o.color.a);
             out.push(match &o.shape {
                 Shape::Rect => DrawCommand::Rect { rect: o.bounds(), color, width: o.width },
@@ -313,13 +371,20 @@ impl Pin {
                     origin: o.a,
                     text: t.clone(),
                     color,
-                    size: 18.0,
+                    size: TEXT_FONT_SIZE,
                 },
             });
         }
         if include_selection {
             if let Some(i) = self.editor.selected() {
-                if let Some(o) = self.editor.objects().get(i) {
+                // 编辑中的文字同理：输入框已经标明了「在编辑这里」，
+                // 再套一个蓝框只是噪声
+                if let Some(o) = self
+                    .editor
+                    .objects()
+                    .get(i)
+                    .filter(|_| !(skip_editing && self.editing_text == Some(i)))
+                {
                     out.push(DrawCommand::SelectionBox { rect: o.bounds() });
                 }
             }
@@ -347,11 +412,12 @@ impl Pin {
 
     /// 工具栏按钮定义。id 与 [`Self::tool_from_id`] 对应。
     fn toolbar_items(&self) -> Vec<ToolbarItem> {
-        const TOOLS: [(u32, &str, Tool); 4] = [
+        const TOOLS: [(u32, &str, Tool); 5] = [
             (0, "选择", Tool::Select),
             (1, "矩形", Tool::Rect),
             (2, "箭头", Tool::Arrow),
             (3, "打码", Tool::Redact),
+            (4, "文字", Tool::Text),
         ];
         let current = self.editor.tool();
         TOOLS
@@ -370,6 +436,7 @@ impl Pin {
             1 => Some(Tool::Rect),
             2 => Some(Tool::Arrow),
             3 => Some(Tool::Redact),
+            4 => Some(Tool::Text),
             _ => None,
         }
     }
@@ -404,13 +471,164 @@ impl Pin {
             };
             match outcome {
                 EditOutcome::Redraw => dirty = true,
-                // 文字输入需要原生输入控件，尚未接入
-                EditOutcome::BeginTextInput(_) => dirty = true,
+                EditOutcome::BeginTextInput(i) => {
+                    self.begin_text(i);
+                    dirty = true;
+                }
                 EditOutcome::Idle => {}
             }
         }
         dirty
     }
+
+    /// 就地弹出原生输入框，编辑第 `i` 个文字对象。
+    ///
+    /// 输入交给平台控件是为了白拿输入法：预编辑、候选词、双拼、
+    /// emoji 面板全都自动可用，自己实现一遍毫无胜算。
+    fn begin_text(&mut self, i: usize) {
+        let Some(o) = self.editor.objects().get(i) else { return };
+        let Shape::Text(text) = o.shape.clone() else { return };
+        let (rect, c) = (o.bounds(), o.color);
+        self.window.begin_text_input(
+            rect,
+            &text,
+            TEXT_FONT_SIZE,
+            Rgba::new(c.r, c.g, c.b, c.a),
+        );
+        self.editing_text = Some(i);
+        self.editing_last = text;
+    }
+
+    /// 进出标注模式，并同步工具栏的显隐。
+    ///
+    /// 两件事必须一起做：工具栏只在标注模式下才有意义，而退出时若不撤掉，
+    /// 它会孤零零地挂在贴图下面。
+    fn set_annotation_mode(&mut self, on: bool) {
+        if !on {
+            self.end_text();
+        }
+        self.window.set_annotation_mode(on);
+        if on {
+            self.window.set_toolbar(&self.toolbar_items());
+        } else {
+            self.window.set_toolbar(&[]);
+        }
+    }
+
+    /// 消费窗口内按键，返回（是否需要重绘，交回主循环的动作）。
+    fn pump_keys(&mut self) -> (bool, Vec<PinAction>) {
+        let mut dirty = false;
+        let mut actions = Vec::new();
+        loop {
+            let next = self.keys.borrow_mut().pop_front();
+            let Some(k) = next else { break };
+            match k {
+                // 空格显隐标注工具栏 —— 对齐 Snipaste
+                KeyPress::Plain(' ') => {
+                    let on = !self.window.is_annotation_mode();
+                    self.set_annotation_mode(on);
+                    dirty = true;
+                }
+                KeyPress::Plain(c) => {
+                    // 单字母工具键对齐 CleanShot X：T 文字 / A 箭头 / R 矩形 / B 打码
+                    let Some(tool) = Self::tool_from_key(c) else { continue };
+                    // 直接按工具键即进入标注模式，省掉「先按空格」这一步
+                    if !self.window.is_annotation_mode() {
+                        self.set_annotation_mode(true);
+                    }
+                    self.editor.set_tool(tool);
+                    dirty = true;
+                }
+                KeyPress::Command('z') => {
+                    // 先收掉输入框：撤销会换掉整份文档快照，下标随之失效，
+                    // 而输入框还对着旧下标，接着写就会改到别的对象头上
+                    self.end_text();
+                    if self.editor.undo() {
+                        dirty = true;
+                    }
+                }
+                KeyPress::Command('c') => actions.push(PinAction::Copy),
+                // ⌘S 存储为、⌘⇧S 快速保存 —— 对齐 Snipaste 的既有分工。
+                // 无提示地丢进固定目录，从用户视角与「快捷键坏了」无法区分。
+                KeyPress::Command('s') => actions.push(PinAction::SaveAs),
+                KeyPress::CommandShift('s') => actions.push(PinAction::QuickSave),
+                KeyPress::Command(_) | KeyPress::CommandShift(_) => {}
+                // 对齐 Snipaste：Esc 先收标注，再按才关窗
+                KeyPress::Escape => {
+                    if self.window.is_annotation_mode() {
+                        self.set_annotation_mode(false);
+                        dirty = true;
+                    } else {
+                        actions.push(PinAction::Close);
+                    }
+                }
+            }
+        }
+        (dirty, actions)
+    }
+
+    /// 单字母到工具的映射。字母取自 CleanShot X 的既有约定，
+    /// 用户从别的工具迁过来不必重新记。
+    fn tool_from_key(c: char) -> Option<Tool> {
+        match c {
+            'v' => Some(Tool::Select),
+            'r' => Some(Tool::Rect),
+            'a' => Some(Tool::Arrow),
+            'b' => Some(Tool::Redact),
+            't' => Some(Tool::Text),
+            _ => None,
+        }
+    }
+
+    /// 立即收掉进行中的文字输入：取回内容、撤下输入框、走一遍结束流程。
+    ///
+    /// 供撤销一类会打乱下标的操作在动手之前调用。无输入进行中时什么都不做。
+    fn end_text(&mut self) {
+        let Some(i) = self.editing_text.take() else { return };
+        if let Some(input) = self.window.poll_text_input() {
+            self.editor.set_text(i, input.text, Some(input.extent));
+        }
+        self.window.end_text_input();
+        self.editor.finish_text(i);
+        self.editing_last.clear();
+    }
+
+    /// 把原生输入框里的内容同步进标注模型，返回是否需要重绘。
+    ///
+    /// 尺寸也一并取回：核心层没有字体度量，文字的包围盒只能由这里喂进去，
+    /// 否则用户刚打完的字既选不中也拖不动。
+    fn pump_text(&mut self) -> bool {
+        let Some(i) = self.editing_text else { return false };
+        let Some(input) = self.window.poll_text_input() else {
+            // 输入框已被窗口层收走（例如退出了标注模式），仍须走一遍结束流程 ——
+            // 否则空文字对象会留在文档里，看不见却选得中
+            self.editor.finish_text(i);
+            self.editing_text = None;
+            self.editing_last.clear();
+            return true;
+        };
+        if !input.finished && input.text == self.editing_last {
+            return false;
+        }
+        self.editing_last = input.text.clone();
+        self.editor.set_text(i, input.text, Some(input.extent));
+        if input.finished {
+            self.window.end_text_input();
+            self.editor.finish_text(i);
+            self.editing_text = None;
+            self.editing_last.clear();
+        }
+        true
+    }
+}
+
+/// 保存对话框里预填的文件名。
+fn default_file_name() -> String {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("PinWall-{stamp}.png")
 }
 
 /// 把图像存到桌面，文件名带时间戳。
@@ -538,6 +756,14 @@ fn capture_and_pin(
         }));
     }
 
+    let keys: Rc<RefCell<VecDeque<KeyPress>>> = Rc::new(RefCell::new(VecDeque::new()));
+    {
+        let q = keys.clone();
+        pin.set_key_handler(Rc::new(move |k: KeyPress| {
+            q.borrow_mut().push_back(k);
+        }));
+    }
+
     let pending_tool: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
     {
         let slot = pending_tool.clone();
@@ -550,5 +776,8 @@ fn capture_and_pin(
         editor: AnnotationEditor::new(),
         events,
         pending_tool,
+        editing_text: None,
+        editing_last: String::new(),
+        keys,
     }))
 }
