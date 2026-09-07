@@ -257,6 +257,14 @@ impl AnnotationEditor {
         self.doc.selected
     }
 
+    /// 当前是否正抓着某个标注（移动或缩放中）。
+    ///
+    /// 供渲染层判断一次按下是否被标注消费掉了：Select 工具在空白处按下时
+    /// 什么也没抓到，那一拖的意图就不是画画，而是挪动贴图本身。
+    pub fn has_active_drag(&self) -> bool {
+        !matches!(self.drag, Drag::None)
+    }
+
     pub fn tool(&self) -> Tool {
         self.tool
     }
@@ -692,6 +700,23 @@ mod tests {
         let line = &e.objects()[0];
         assert!(line.hit(p(50.0, 50.0)));
         assert!(!line.hit(p(95.0, 5.0)), "包围盒内但远离线段，不应命中");
+    }
+
+    /// 渲染层据 `has_active_drag` 决定这一拖是画标注还是挪贴图：
+    /// Select 工具落在空白处什么也没抓着，那就该让窗口跟着走。
+    #[test]
+    fn select_on_empty_space_grabs_nothing() {
+        let mut e = AnnotationEditor::new();
+        e.set_tool(Tool::Rect);
+        drag(&mut e, p(10.0, 10.0), p(60.0, 60.0));
+
+        e.set_tool(Tool::Select);
+        e.handle(EditEvent::Down(p(35.0, 35.0)));
+        assert!(e.has_active_drag(), "按在矩形上应抓住它");
+
+        e.handle(EditEvent::Up(p(35.0, 35.0)));
+        e.handle(EditEvent::Down(p(300.0, 300.0)));
+        assert!(!e.has_active_drag(), "按在空白处不该抓住任何标注");
     }
 
     #[test]

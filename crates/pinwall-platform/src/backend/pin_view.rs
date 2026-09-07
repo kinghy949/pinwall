@@ -41,8 +41,14 @@ pub struct PinViewIvars {
     pub handler: RefCell<Option<PointerHandler>>,
     /// 按下时鼠标在窗口内的偏移，用于拖动时保持抓取点不变。
     pub grab_offset: Cell<Option<NSPoint>>,
+    /// 标注模式下这一拖是否用来移动窗口。由应用层在按下后回填 ——
+    /// 见 `set_window_drag`。
+    pub window_drag: Cell<bool>,
     /// 窗口是否已被用户关闭。上层据此回收对应的 PinWindow。
     pub closed: Cell<bool>,
+    /// 用户双击请求「复制并关闭」。由上层取走并执行 —— 复制要先把标注烧进
+    /// 像素，那是应用层的活，窗口层做不了。
+    pub copy_request: Cell<bool>,
     /// 100% 时的逻辑尺寸。缩放始终以它为基准计算，
     /// 而非在当前尺寸上累乘，避免反复缩放后累积误差。
     pub base_size: Cell<NSSize>,
@@ -86,13 +92,32 @@ define_class!(
                 return;
             }
             if self.ivars().annotating.get() {
+                // 空白处双击 = 复制并关闭，与非标注模式下一致 —— 刚截完的图
+                // 正处在标注模式，若只认「钉住之后」，最常用的那一刻反而没有。
+                //
+                // 只在这一下没抓住任何标注时才认（window_drag 记的正是上一次
+                // 按下的结论，双击的第二下恰好读到第一下的），否则画图时的
+                // 双击会误收整张贴图。
+                if event.clickCount() >= 2 && self.ivars().window_drag.get() {
+                    self.ivars().copy_request.set(true);
+                    return;
+                }
+                // 抓取点照记不误：这一拖到底是画画还是挪窗口，要等应用层
+                // 处理完这次按下才知道（它才知道有没有命中标注）。等真的
+                // 判成挪窗口时，锚点已经在手上了，不会跳。
+                self.ivars().window_drag.set(false);
+                self.ivars().grab_offset.set(Some(event.locationInWindow()));
                 self.emit(PointerEvent::Down(self.local_point(event)));
                 return;
             }
-            // 双击关闭 —— 与 Snipaste 一致。标注模式下不生效，
-            // 否则画图时双击会误关整张贴图。
+            // 双击 = 复制并关闭。标注模式下不生效，否则画图时双击会误收整张
+            // 贴图。
+            //
+            // 原本双击是直接关闭的（对齐 Snipaste），但那一下不可撤销 ——
+            // 一张还没存过的截图就此没了。先把内容留在剪贴板再收，代价为零。
+            // 想直接丢弃仍有右键。
             if event.clickCount() >= 2 {
-                self.close_self();
+                self.ivars().copy_request.set(true);
                 return;
             }
             self.ivars().grab_offset.set(Some(event.locationInWindow()));
@@ -100,7 +125,7 @@ define_class!(
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, _event: &NSEvent) {
-            if self.ivars().annotating.get() {
+            if self.ivars().annotating.get() && !self.ivars().window_drag.get() {
                 self.emit(PointerEvent::Moved(self.local_point(_event)));
                 return;
             }
@@ -114,10 +139,13 @@ define_class!(
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &NSEvent) {
-            if self.ivars().annotating.get() {
+            if self.ivars().annotating.get() && !self.ivars().window_drag.get() {
                 self.emit(PointerEvent::Up(self.local_point(_event)));
                 return;
             }
+            // 不清 window_drag：双击的第二下要靠它读到第一下的结论。
+            // 下一次按下本就会重置它，且拖拽判定还要 grab_offset 在手，
+            // 故留着无害。
             self.ivars().grab_offset.set(None);
         }
 
@@ -238,6 +266,8 @@ impl PinView {
             image: RefCell::new(Some(image)),
             commands: RefCell::new(Vec::new()),
             annotating: Cell::new(false),
+            window_drag: Cell::new(false),
+            copy_request: Cell::new(false),
             handler: RefCell::new(None),
             grab_offset: Cell::new(None),
             closed: Cell::new(false),
@@ -338,7 +368,20 @@ impl PinView {
         self.ivars().annotating.set(on);
         // 退出标注模式时清掉半途的拖拽状态，否则下次点击会误判为继续拖动
         self.ivars().grab_offset.set(None);
+        self.ivars().window_drag.set(false);
         self.setNeedsDisplay(true);
+    }
+
+    /// 告知本次拖拽是否用于移动窗口。
+    ///
+    /// 只在标注模式下有意义：非标注模式下拖拽本来就是移动。
+    pub fn set_window_drag(&self, enabled: bool) {
+        self.ivars().window_drag.set(enabled);
+    }
+
+    /// 取走「复制并关闭」的请求，同时清掉它。
+    pub fn take_copy_request(&self) -> bool {
+        self.ivars().copy_request.replace(false)
     }
 
     pub fn is_annotating(&self) -> bool {

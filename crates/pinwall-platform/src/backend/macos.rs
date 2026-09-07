@@ -8,7 +8,7 @@
 
 use objc2::rc::Retained;
 use std::cell::{Cell, RefCell};
-use objc2::MainThreadMarker;
+use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSPanel, NSScreen, NSWindowAnimationBehavior,
     NSWindowCollectionBehavior,
@@ -75,16 +75,34 @@ impl MacPlatform {
 
 /// 按原型 1 的结论构造面板：NSPanel + NonactivatingPanel。
 /// 贴图、遮罩、工具栏共用同一套窗口属性。
-fn make_panel(mtm: MainThreadMarker, cocoa_frame: NSRect, opaque: bool) -> Retained<NSPanel> {
+fn make_panel(
+    mtm: MainThreadMarker,
+    cocoa_frame: NSRect,
+    opaque: bool,
+    keyable: bool,
+) -> Retained<NSPanel> {
+    // NonactivatingPanel 是能覆盖他人全屏窗口的结构前提
+    let style = NSWindowStyleMask::NonactivatingPanel | NSWindowStyleMask::Borderless;
+    let backing = NSBackingStoreType::Buffered;
     // 用 KeyablePanel 而非 NSPanel：无边框窗口默认拿不到键盘焦点，
-    // 文字标注需要它（见 `panel.rs`）
-    let panel: Retained<NSPanel> = KeyablePanel::make(
-        mtm,
-        cocoa_frame,
-        // NonactivatingPanel 是能覆盖他人全屏窗口的结构前提
-        NSWindowStyleMask::NonactivatingPanel | NSWindowStyleMask::Borderless,
-        NSBackingStoreType::Buffered,
-    );
+    // 文字标注需要它（见 `panel.rs`）。
+    //
+    // 但遮罩**不能**要这个能力：它没有 keyDown，一旦点它就成了 key window，
+    // 把焦点从贴图手里抢走 —— 暂存期点一下压暗区，Enter / Esc 就全失灵了。
+    let panel: Retained<NSPanel> = if keyable {
+        KeyablePanel::make(mtm, cocoa_frame, style, backing)
+    } else {
+        let p = NSPanel::alloc(mtm);
+        unsafe {
+            msg_send![
+                p,
+                initWithContentRect: cocoa_frame,
+                styleMask: style,
+                backing: backing,
+                defer: false,
+            ]
+        }
+    };
     panel.setFloatingPanel(true);
     panel.setHidesOnDeactivate(false);
     // 关掉窗口的显隐动画。默认行为下 orderOut: 是**淡出**的，而遮罩要在快门
@@ -120,7 +138,7 @@ impl Platform for MacPlatform {
     }
 
     fn create_pin(&self, frame: Rect) -> Result<Box<dyn PinWindow>> {
-        let panel = make_panel(self.mtm, self.to_cocoa(frame), true);
+        let panel = make_panel(self.mtm, self.to_cocoa(frame), true, true);
         // 投影进一步把贴图与其下方的真实界面区分开
         panel.setHasShadow(true);
         panel.orderFrontRegardless();
@@ -143,7 +161,8 @@ impl Platform for MacPlatform {
 
     fn create_overlay(&self, screen: &ScreenInfo) -> Result<Box<dyn Overlay>> {
         let cocoa = self.to_cocoa(screen.frame);
-        let panel = make_panel(self.mtm, cocoa, false);
+        // 遮罩不可成为 key window，理由见 make_panel
+        let panel = make_panel(self.mtm, cocoa, false, false);
         // 背景交给视图绘制（需要在压暗层上镂空选区），窗口本身保持透明
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
 
@@ -265,6 +284,19 @@ impl PinWindow for MacPin {
         }
     }
 
+    fn take_copy_request(&self) -> bool {
+        self.view
+            .borrow()
+            .as_ref()
+            .is_some_and(|v| v.take_copy_request())
+    }
+
+    fn set_window_drag(&self, enabled: bool) {
+        if let Some(v) = self.view.borrow().as_ref() {
+            v.set_window_drag(enabled);
+        }
+    }
+
     fn set_annotation_mode(&self, enabled: bool) {
         if let Some(v) = self.view.borrow().as_ref() {
             v.set_annotating(enabled);
@@ -293,7 +325,8 @@ impl PinWindow for MacPin {
         let mut slot = self.toolbar.borrow_mut();
         if slot.is_none() {
             let size = toolbar_size(items.len());
-            let tb = make_panel(self.mtm, NSRect::new(NSPoint::new(0.0, 0.0), size), false);
+            // 工具栏同样不该抢焦点：它一抢，贴图上的单字母工具键就没了
+            let tb = make_panel(self.mtm, NSRect::new(NSPoint::new(0.0, 0.0), size), false, false);
             tb.setBackgroundColor(Some(&NSColor::clearColor()));
             // 层级高于贴图，避免被自身的投影遮住
             tb.setLevel(OVERLAY_LEVEL + 1);

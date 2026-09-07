@@ -115,7 +115,7 @@ PinWall  —— 把截图钉在屏幕上
   Esc    标注模式下退出标注；否则关闭该贴图
 
 刚框选完处于「暂存」状态，四周仍压暗：
-  Enter   烧入标注 → 进剪贴板 → 收工，不留窗口（⌘C 亦同）
+  Enter   烧入标注 → 进剪贴板 → 收工，不留窗口（⌘C、空白处双击亦同）
   ⇧Enter  烧入标注 → 留成置顶浮窗
   Esc     放弃本次截图（在压暗区右键亦可）
 
@@ -123,7 +123,8 @@ PinWall  —— 把截图钉在屏幕上
   滚轮        缩放（以光标为锚点）
   Shift+滚轮  调透明度（Option+滚轮亦可）
   中键        切换鼠标穿透
-  双击 / 右键 关闭
+  双击        复制到剪贴板并关闭（含标注）
+  右键        直接关闭，不复制
 
 标注模式下贴图下方会浮出工具栏，可直接点击切换工具，不依赖键盘。
 文字工具：点一下即就地弹出输入框（支持输入法），回车或点别处提交。
@@ -187,6 +188,16 @@ PinWall  —— 把截图钉在屏幕上
             }
             for a in acts {
                 actions.push((i, a));
+            }
+            // 双击 = 复制并关闭。顺序有意义：先复制，再关窗
+            if pin.window.take_copy_request() {
+                actions.push((i, PinAction::Copy));
+                actions.push((i, PinAction::Close));
+            }
+            // 碰过遮罩就把贴图重新抬回最前并取回焦点
+            if pin.staging && pin.staging_touch.replace(false) {
+                pin.window.show();
+                pin.window.focus();
             }
             // 遮罩上右键 = 放弃本次截图
             if pin.staging_cancelled() {
@@ -359,6 +370,9 @@ struct Pin {
     overlays: Option<OverlaySet>,
     /// 暂存期在遮罩上右键即放弃 —— 键盘焦点万一异常，这是唯一的逃生口。
     staging_cancel: Rc<Cell<bool>>,
+    /// 暂存期用户碰过遮罩。据此把贴图重新置顶并取回焦点 ——
+    /// 点一下遮罩会把它抬到贴图之上，贴图就沉到压暗层底下去了。
+    staging_touch: Rc<Cell<bool>>,
     /// 窗口内按键的队列。
     ///
     /// 与指针事件同理：回调不能直接驱动编辑器，否则要捕获对它的共享引用，
@@ -533,7 +547,16 @@ impl Pin {
             let next = self.events.borrow_mut().pop_front();
             let Some(ev) = next else { break };
             let outcome = match ev {
-                PointerEvent::Down(p) => self.editor.handle(EditEvent::Down(p)),
+                PointerEvent::Down(p) => {
+                    let o = self.editor.handle(EditEvent::Down(p));
+                    // Select 工具在空白处按下 —— 什么标注也没抓着，那这一拖
+                    // 的意图就是挪贴图本身。窗口层判断不了这件事：它既不知道
+                    // 有哪些标注，也不知道当前是什么工具，故由此处回填。
+                    let move_window = self.editor.tool() == Tool::Select
+                        && !self.editor.has_active_drag();
+                    self.window.set_window_drag(move_window);
+                    o
+                }
                 PointerEvent::Moved(p) => self.editor.handle(EditEvent::Move(p)),
                 PointerEvent::Up(p) => self.editor.handle(EditEvent::Up(p)),
                 // 标注模式下右键用于删除选中对象
@@ -783,6 +806,7 @@ fn make_pin(
         staging: false,
         overlays: None,
         staging_cancel: Rc::new(Cell::new(false)),
+        staging_touch: Rc::new(Cell::new(false)),
     }
 }
 
@@ -994,11 +1018,16 @@ fn capture_and_stage(
     // 框选阶段的事件队列到此为止。换成只认「右键放弃」的回调 ——
     // 既避免事件在无人消费的队列里越积越多，也给键盘失灵时留一个逃生口。
     let staging_cancel: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let staging_touch: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     {
-        let flag = staging_cancel.clone();
+        let cancel = staging_cancel.clone();
+        let touch = staging_touch.clone();
         overlays.set_pointer_handler(Rc::new(move |ev: PointerEvent| {
+            // 任何一次触碰都要记：点中遮罩会把它抬到贴图之上，
+            // 贴图随之沉到压暗层底下 —— 看上去就是整屏变灰、按键全失灵。
+            touch.set(true);
             if matches!(ev, PointerEvent::Cancel) {
-                flag.set(true);
+                cancel.set(true);
             }
         }));
     }
@@ -1025,8 +1054,12 @@ fn capture_and_stage(
         scale: img.scale,
         bgra: &img.bgra,
     })?;
-    // 图已到手，遮罩回到屏上继续压暗四周，标示仍在暂存期
-    overlays.set_selection(Some(sel.rect));
+    // 图已到手，遮罩回到屏上继续压暗四周，标示仍在暂存期。
+    //
+    // 但**镂空要撤掉**：贴图是不透明的，正好盖在选区上，镂空本就看不见；
+    // 而暂存期的贴图可以拖动，一旦挪开，那个洞就会露出底下的实时画面，
+    // 看着像个 bug。改为整屏均匀压暗，贴图浮在上面。
+    overlays.set_selection(None);
     overlays.show();
     // 后于遮罩置顶，从而盖在镂空之上（两者同为 1000 层，靠顺序定胜负）
     pin.show();
@@ -1046,6 +1079,7 @@ fn capture_and_stage(
     staged.staging = true;
     staged.overlays = Some(overlays);
     staged.staging_cancel = staging_cancel;
+    staged.staging_touch = staging_touch;
     // 框选完直接就能画，不必再按一次空格
     staged.set_annotation_mode(true);
     Ok(Some(staged))
