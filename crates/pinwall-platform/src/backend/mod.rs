@@ -50,6 +50,17 @@ pub fn copy_image_to_clipboard(_image: &crate::PinImage<'_>) -> Result<()> {
     Err(crate::Error::Unsupported("clipboard"))
 }
 
+/// 从系统剪贴板读出一张位图。没有图像内容时返回 `None`。
+#[cfg(target_os = "macos")]
+pub fn read_clipboard_image() -> Option<crate::ClipboardImage> {
+    clipboard::read_image()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn read_clipboard_image() -> Option<crate::ClipboardImage> {
+    None
+}
+
 /// 弹出系统「存储为」对话框，返回用户选定的路径。取消返回 `None`。
 ///
 /// **必须在主线程调用，且会阻塞到用户关闭对话框。**

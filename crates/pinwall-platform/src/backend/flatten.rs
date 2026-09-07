@@ -82,7 +82,7 @@ pub fn flatten(image: &PinImage<'_>, commands: &[DrawCommand]) -> Result<Vec<u8>
 /// - **行距**。AppKit 分配的行距通常大于 `宽 * 4`（按对齐补齐），
 ///   必须逐行按实际行距取，不能整块 memcpy。
 /// - **通道序**。位图是 RGBA，而本项目对外一律是 BGRA，取的同时换回来。
-fn read_back(rep: &NSBitmapImageRep, width: usize, height: usize) -> Result<Vec<u8>> {
+pub(super) fn read_back(rep: &NSBitmapImageRep, width: usize, height: usize) -> Result<Vec<u8>> {
     let data = rep.bitmapData();
     if data.is_null() {
         return Err(Error::WindowCreation("导出位图无数据".into()));

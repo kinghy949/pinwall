@@ -604,10 +604,21 @@ fn measure(text: &str, font: Option<&NSFont>) -> NSSize {
 fn key_press_from(event: &NSEvent) -> Option<KeyPress> {
     /// Esc 的虚拟键码。它没有可打印字符，只能按键码认。
     const KEYCODE_ESCAPE: u16 = 53;
+    /// 主键盘回车与小键盘回车。两者都要接，否则外接键盘上按不动。
+    const KEYCODE_RETURN: u16 = 36;
+    const KEYCODE_KEYPAD_ENTER: u16 = 76;
+
     if event.keyCode() == KEYCODE_ESCAPE {
         return Some(KeyPress::Escape);
     }
     let flags = event.modifierFlags();
+    if matches!(event.keyCode(), KEYCODE_RETURN | KEYCODE_KEYPAD_ENTER) {
+        // 回车的 charactersIgnoringModifiers 是控制字符，会被下面的
+        // is_control 滤掉，故必须在此之前按键码认出来
+        return Some(KeyPress::Enter {
+            shift: flags.contains(NSEventModifierFlags::Shift),
+        });
+    }
     // 带 ⌃ / ⌥ 的组合一律不接，留给系统和输入法
     if flags.contains(NSEventModifierFlags::Control)
         || flags.contains(NSEventModifierFlags::Option)

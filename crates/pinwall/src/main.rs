@@ -1,8 +1,9 @@
 //! PinWall —— 把截图钉在屏幕上。
 //!
 //! 当前实现的闭环：
-//!   全局热键 → 每屏遮罩 → 框选（可跨屏）→ 分屏捕获并拼接 → 贴为置顶浮窗
-//!   → 标注（工具栏 / 快捷键，文字走原生输入框）→ 烧进像素后存盘或复制
+//!   全局热键 → 每屏遮罩 → 框选（可跨屏）→ 分屏捕获并拼接 → **暂存**
+//!   → 就地标注（工具栏 / 单字母键，文字走原生输入框）
+//!   → Enter 烧进像素进剪贴板并收工，或 ⇧Enter 留成置顶浮窗
 //!
 //! 尚未接入：历史库、上传工作流。
 
@@ -26,10 +27,11 @@ use pinwall_capture::{
 };
 use pinwall_core::annotation::{AnnotationEditor, EditEvent, EditOutcome, Shape, Tool};
 use pinwall_core::{Event, Outcome, Selection, SelectionMachine};
-use pinwall_platform::geom::Rect;
+use pinwall_platform::geom::{Point, Rect};
 use pinwall_platform::{
-    ask_save_path, copy_image_to_clipboard, current_platform, flatten_annotations, DrawCommand,
-    KeyPress, OverlaySet, PinImage, PinWindow, Platform, PointerEvent, Rgba, ToolbarItem,
+    ask_save_path, copy_image_to_clipboard, current_platform, flatten_annotations,
+    read_clipboard_image, DrawCommand, KeyPress, OverlaySet, PinImage, PinWindow, Platform,
+    PointerEvent, Rgba, ToolbarItem,
 };
 
 fn main() {
@@ -73,10 +75,14 @@ fn main() {
     // 鼠标穿透**必须**留在全局：穿透开启后窗口既收不到鼠标也收不到按键，
     // 没有这条外部通路就再也关不掉了
     let through_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyT);
+    // F3 对齐 Snipaste：把剪贴板里的图贴成浮窗。来源不限于自家截图 ——
+    // 从浏览器、聊天窗口复制来的图都能钉上去。
+    let paste_key = HotKey::new(None, Code::F3);
     // 标注模式的保底通路。正常应按空格（窗口内），但万一贴图窗口拿不到
     // 键盘焦点，没有它就完全进不去标注模式 —— 而工具栏只在标注模式下才出现。
     let annotate_key = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyE);
     manager.register(capture_key).expect("注册 F1 失败");
+    manager.register(paste_key).expect("注册 F3 失败");
     manager.register(clear_key).expect("注册 ⌘⇧X 失败");
     manager.register(through_key).expect("注册 ⌘⇧T 失败");
     manager.register(annotate_key).expect("注册 ⌘⇧E 失败");
@@ -86,7 +92,8 @@ fn main() {
 PinWall  —— 把截图钉在屏幕上
 
 全局快捷键（在任何地方都生效）
-  F1     截图并贴到屏幕上（拖拽框选，右键取消）
+  F1     截图（拖拽框选 → 就地标注 → Enter 复制收工 / ⇧Enter 留在屏上）
+  F3     把剪贴板里的图贴成浮窗
   ⌘⇧X   关闭所有贴图
   ⌘⇧T   切换所有贴图的鼠标穿透
   ⌘⇧E   进出标注模式（正常用空格，这是拿不到焦点时的保底通路）
@@ -94,13 +101,18 @@ PinWall  —— 把截图钉在屏幕上
 
 贴图窗口内（先点一下贴图使其取得焦点）
   空格   显隐标注工具栏（进出标注模式）
-  V      选择      R  矩形      A  箭头
-  B      打码      T  文字
+  V 选择   R 矩形   O 椭圆   L 直线   A 箭头
+  H 高亮   B 打码   N 序号   T 文字
   ⌘Z     撤销标注
   ⌘C     复制到剪贴板（含标注）
   ⌘S     存储为…（弹对话框选位置，含标注）
   ⌘⇧S    快速保存到桌面（不打断，含标注）
   Esc    标注模式下退出标注；否则关闭该贴图
+
+刚框选完处于「暂存」状态，四周仍压暗：
+  Enter   烧入标注 → 进剪贴板 → 收工，不留窗口
+  ⇧Enter  烧入标注 → 留成置顶浮窗
+  Esc     放弃本次截图（在压暗区右键亦可）
 
   拖拽        移动
   滚轮        缩放（以光标为锚点）
@@ -141,7 +153,17 @@ PinWall  —— 把截图钉在屏幕上
 
         // 回收用户自行关掉的贴图（双击 / 右键）。窗口关闭由用户在窗口上
         // 直接触发，上层无从感知，只能轮询回收，否则 Box 会一直堆着。
-        pins.retain(|p: &Pin| !p.window.is_closed());
+        //
+        // 不能用 retain：那样只是 drop 掉 Pin，暂存期的遮罩不会被关闭，
+        // 会留下一层盖住整个屏幕的暗色面板。
+        let mut i = 0;
+        while i < pins.len() {
+            if pins[i].window.is_closed() {
+                pins.remove(i).dispose();
+            } else {
+                i += 1;
+            }
+        }
 
         // 驱动处于标注模式的贴图
         for (i, pin) in pins.iter_mut().enumerate() {
@@ -161,12 +183,20 @@ PinWall  —— 把截图钉在屏幕上
             for a in acts {
                 actions.push((i, a));
             }
+            // 遮罩上右键 = 放弃本次截图
+            if pin.staging_cancelled() {
+                actions.push((i, PinAction::Close));
+            }
         }
 
         // 按键触发的外部动作单独处理：它们要动到贴图集合或文件系统，
         // 在遍历 pins 的过程中做不了
         for (i, a) in actions.drain(..) {
             match a {
+                PinAction::Keep => {
+                    pins[i].keep();
+                    println!("已贴在屏幕上，当前共 {} 张（⌘⇧X 全部关闭）", pins.len());
+                }
                 PinAction::SaveAs => {
                     let r = pins[i].export_image().and_then(|img| {
                         match ask_save_path(&default_file_name()) {
@@ -212,9 +242,9 @@ PinWall  —— 把截图钉在屏幕上
             closing.sort_unstable();
             closing.dedup();
             for i in closing.drain(..).rev() {
-                pins.remove(i).window.close();
+                pins.remove(i).dispose();
             }
-            println!("已关闭贴图，当前剩 {} 张", pins.len());
+            println!("已收起，当前剩 {} 张贴图", pins.len());
         }
 
         while let Ok(ev) = rx.try_recv() {
@@ -222,26 +252,29 @@ PinWall  —— 把截图钉在屏幕上
                 continue;
             }
             if ev.id == capture_key.id() {
-                match capture_and_pin(&app, platform.as_ref(), capturer.as_ref()) {
+                match capture_and_stage(&app, platform.as_ref(), capturer.as_ref()) {
                     Ok(Some(pin)) => {
-                        // 截图即入剪贴板：多数使用场景下一步就是粘贴，
-                        // 让用户不必再多按一次
-                        match copy_image_to_clipboard(&pin.as_pin_image()) {
-                            Ok(()) => println!(
-                                "已贴图并复制到剪贴板，当前共 {} 张（⌘⇧X 全部关闭）",
-                                pins.len() + 1
-                            ),
-                            Err(e) => println!("已贴图（复制到剪贴板失败: {e}）"),
-                        }
                         pins.push(pin);
+                        println!(
+                            "已框选，可直接标注：Enter 复制并收工 · ⇧Enter 贴在屏幕上 · Esc 放弃"
+                        );
                     }
                     Ok(None) => println!("已取消"),
                     Err(e) => eprintln!("失败: {e}"),
                 }
+            } else if ev.id == paste_key.id() {
+                match pin_from_clipboard(platform.as_ref()) {
+                    Ok(Some(pin)) => {
+                        pins.push(pin);
+                        println!("已贴出剪贴板内容，当前共 {} 张（⌘⇧X 全部关闭）", pins.len());
+                    }
+                    Ok(None) => println!("剪贴板里没有图片"),
+                    Err(e) => eprintln!("贴图失败: {e}"),
+                }
             } else if ev.id == clear_key.id() {
                 let n = pins.len();
                 for p in pins.drain(..) {
-                    p.window.close();
+                    p.dispose();
                 }
                 println!("已关闭 {n} 张贴图");
             } else if ev.id == annotate_key.id() {
@@ -250,7 +283,7 @@ PinWall  —— 把截图钉在屏幕上
                         let on = !p.window.is_annotation_mode();
                         p.set_annotation_mode(on);
                         println!(
-                            "{}标注模式（工具栏可点击，或用 V/R/A/B/T；右键删除选中）",
+                            "{}标注模式（工具栏可点击，或用 V/R/O/L/A/H/B/N/T；右键删除选中）",
                             if on { "已进入" } else { "已退出" }
                         );
                     }
@@ -279,6 +312,8 @@ PinWall  —— 把截图钉在屏幕上
 /// 这几件事都要动到贴图集合本身或文件系统，[`Pin`] 自己做不了 ——
 /// 它拿不到 `pins`，也不该拿到。
 enum PinAction {
+    /// 暂存期结束，落定为一张普通贴图（⇧Enter）。
+    Keep,
     /// 弹出系统对话框选择保存位置（⌘S）。
     SaveAs,
     /// 直接存进快速目录，不打断用户（⌘⇧S）。
@@ -309,6 +344,16 @@ struct Pin {
     editing_text: Option<usize>,
     /// 上一次取回的文字内容，用来避免每帧无谓重绘。
     editing_last: String,
+    /// 暂存期：刚框选完、尚未决定去留。
+    ///
+    /// 此时 Enter 表示「复制并收工」，⇧Enter 表示「留成贴图」，Esc 放弃。
+    /// 落定之后这三个键的含义都不一样了，故必须区分。
+    staging: bool,
+    /// 暂存期仍然铺着的遮罩。压暗周围是在提示「你还在一次截图流程里」，
+    /// 少了它用户不知道此刻 Enter 有特殊含义。落定或放弃时一并撤掉。
+    overlays: Option<OverlaySet>,
+    /// 暂存期在遮罩上右键即放弃 —— 键盘焦点万一异常，这是唯一的逃生口。
+    staging_cancel: Rc<Cell<bool>>,
     /// 窗口内按键的队列。
     ///
     /// 与指针事件同理：回调不能直接驱动编辑器，否则要捕获对它的共享引用，
@@ -360,13 +405,30 @@ impl Pin {
             let color = Rgba::new(o.color.r, o.color.g, o.color.b, o.color.a);
             out.push(match &o.shape {
                 Shape::Rect => DrawCommand::Rect { rect: o.bounds(), color, width: o.width },
+                Shape::Ellipse => DrawCommand::Ellipse {
+                    rect: o.bounds(),
+                    color,
+                    width: o.width,
+                },
+                Shape::Line => DrawCommand::Line {
+                    from: o.a,
+                    to: o.b,
+                    color,
+                    width: o.width,
+                },
                 Shape::Arrow => DrawCommand::Arrow {
                     from: o.a,
                     to: o.b,
                     color,
                     width: o.width,
                 },
+                Shape::Highlight => DrawCommand::Highlight { rect: o.bounds() },
                 Shape::Redact => DrawCommand::Redact { rect: o.bounds() },
+                Shape::Number(n) => DrawCommand::Number {
+                    rect: o.bounds(),
+                    value: *n,
+                    color,
+                },
                 Shape::Text(t) => DrawCommand::Text {
                     origin: o.a,
                     text: t.clone(),
@@ -412,12 +474,17 @@ impl Pin {
 
     /// 工具栏按钮定义。id 与 [`Self::tool_from_id`] 对应。
     fn toolbar_items(&self) -> Vec<ToolbarItem> {
-        const TOOLS: [(u32, &str, Tool); 5] = [
+        // 顺序与工具栏按钮一致；id 亦即 [`Self::tool_from_id`] 的入参
+        const TOOLS: [(u32, &str, Tool); 9] = [
             (0, "选择", Tool::Select),
             (1, "矩形", Tool::Rect),
-            (2, "箭头", Tool::Arrow),
-            (3, "打码", Tool::Redact),
-            (4, "文字", Tool::Text),
+            (2, "椭圆", Tool::Ellipse),
+            (3, "直线", Tool::Line),
+            (4, "箭头", Tool::Arrow),
+            (5, "高亮", Tool::Highlight),
+            (6, "打码", Tool::Redact),
+            (7, "序号", Tool::Number),
+            (8, "文字", Tool::Text),
         ];
         let current = self.editor.tool();
         TOOLS
@@ -434,9 +501,13 @@ impl Pin {
         match id {
             0 => Some(Tool::Select),
             1 => Some(Tool::Rect),
-            2 => Some(Tool::Arrow),
-            3 => Some(Tool::Redact),
-            4 => Some(Tool::Text),
+            2 => Some(Tool::Ellipse),
+            3 => Some(Tool::Line),
+            4 => Some(Tool::Arrow),
+            5 => Some(Tool::Highlight),
+            6 => Some(Tool::Redact),
+            7 => Some(Tool::Number),
+            8 => Some(Tool::Text),
             _ => None,
         }
     }
@@ -499,6 +570,32 @@ impl Pin {
         self.editing_last = text;
     }
 
+    /// 暂存期结束，落定为一张普通贴图。
+    fn keep(&mut self) {
+        self.close_overlays();
+        self.staging = false;
+        // 退出标注模式，贴图恢复为可拖动；想接着标注按空格即可
+        self.set_annotation_mode(false);
+    }
+
+    /// 用户是否在遮罩上右键放弃了本次截图。
+    fn staging_cancelled(&self) -> bool {
+        self.staging && self.staging_cancel.get()
+    }
+
+    fn close_overlays(&mut self) {
+        if let Some(o) = self.overlays.take() {
+            // 必须显式关闭：遮罩每次截图都会重建，只 drop 会留下悬着的面板
+            o.close();
+        }
+    }
+
+    /// 关闭并释放。遮罩要先撤，否则会留下一层盖住整个屏幕的暗色面板。
+    fn dispose(mut self) {
+        self.close_overlays();
+        self.window.close();
+    }
+
     /// 进出标注模式，并同步工具栏的显隐。
     ///
     /// 两件事必须一起做：工具栏只在标注模式下才有意义，而退出时若不撤掉，
@@ -553,9 +650,23 @@ impl Pin {
                 KeyPress::Command('s') => actions.push(PinAction::SaveAs),
                 KeyPress::CommandShift('s') => actions.push(PinAction::QuickSave),
                 KeyPress::Command(_) | KeyPress::CommandShift(_) => {}
-                // 对齐 Snipaste：Esc 先收标注，再按才关窗
+                // 暂存期的收尾：Enter 复制并收工，⇧Enter 留在屏幕上
+                KeyPress::Enter { shift } if self.staging => {
+                    if shift {
+                        actions.push(PinAction::Keep);
+                    } else {
+                        // 顺序有意义：先复制，再关窗
+                        actions.push(PinAction::Copy);
+                        actions.push(PinAction::Close);
+                    }
+                }
+                KeyPress::Enter { .. } => {}
                 KeyPress::Escape => {
-                    if self.window.is_annotation_mode() {
+                    if self.staging {
+                        // 暂存期的 Esc 是放弃整次截图，不是退出标注
+                        actions.push(PinAction::Close);
+                    } else if self.window.is_annotation_mode() {
+                        // 落定之后对齐 Snipaste：先收标注，再按才关窗
                         self.set_annotation_mode(false);
                         dirty = true;
                     } else {
@@ -573,8 +684,12 @@ impl Pin {
         match c {
             'v' => Some(Tool::Select),
             'r' => Some(Tool::Rect),
+            'o' => Some(Tool::Ellipse),
+            'l' => Some(Tool::Line),
             'a' => Some(Tool::Arrow),
+            'h' => Some(Tool::Highlight),
             'b' => Some(Tool::Redact),
+            'n' => Some(Tool::Number),
             't' => Some(Tool::Text),
             _ => None,
         }
@@ -622,6 +737,98 @@ impl Pin {
     }
 }
 
+/// 给一个已建好的贴图窗口装上其余回调，组装成 [`Pin`]。
+///
+/// 指针队列由调用方传入 —— 它必须在**建窗时**就装好，故无法在此处补装。
+fn make_pin(
+    window: Box<dyn PinWindow>,
+    image: CapturedImage,
+    events: Rc<RefCell<VecDeque<PointerEvent>>>,
+) -> Pin {
+    let keys: Rc<RefCell<VecDeque<KeyPress>>> = Rc::new(RefCell::new(VecDeque::new()));
+    {
+        let q = keys.clone();
+        window.set_key_handler(Rc::new(move |k: KeyPress| {
+            q.borrow_mut().push_back(k);
+        }));
+    }
+    let pending_tool: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
+    {
+        let slot = pending_tool.clone();
+        window.set_toolbar_handler(Rc::new(move |id: u32| slot.set(Some(id))));
+    }
+    Pin {
+        window,
+        image,
+        editor: AnnotationEditor::new(),
+        events,
+        pending_tool,
+        editing_text: None,
+        editing_last: String::new(),
+        keys,
+        staging: false,
+        overlays: None,
+        staging_cancel: Rc::new(Cell::new(false)),
+    }
+}
+
+/// 把剪贴板里的图贴成浮窗。剪贴板里没有图像时返回 `Ok(None)`。
+fn pin_from_clipboard(platform: &dyn Platform) -> Result<Option<Pin>, Box<dyn std::error::Error>> {
+    let Some(img) = read_clipboard_image() else {
+        return Ok(None);
+    };
+    // 落在鼠标处：用户刚复制完，视线就在那儿
+    let at = platform
+        .cursor_position()
+        .unwrap_or_else(|| Point::new(100.0, 100.0));
+
+    // 剪贴板**不携带倍率**。实测（examples/clipboard_roundtrip）写入倍率 2 的
+    // 图，读回恒为 1.0 —— 直接采信就会在 Retina 屏上正好贴大一倍。
+    //
+    // 改按目标屏的物理像素密度显示。这恰好让 PinWall 自己的截图与 macOS 系统
+    // 截图都 1:1 还原，因为两者本来就是按屏幕倍率抓的；外部图片则以最清晰的
+    // 方式呈现（一个位图像素对一个屏幕像素）。
+    let screens = platform.screens()?;
+    let screen_scale = screens
+        .iter()
+        .find(|s| s.frame.contains(at))
+        .or_else(|| screens.first())
+        .map(|s| s.scale)
+        .unwrap_or(1.0);
+    // 万一哪天剪贴板真给出了倍率，就采信它
+    let scale = if img.scale > 1.0 { img.scale } else { screen_scale };
+
+    let logical_w = img.width as f64 / scale;
+    let logical_h = img.height as f64 / scale;
+
+    let window = platform.create_pin(Rect::from_xywh(at.x, at.y, logical_w, logical_h))?;
+    window.set_image(&PinImage {
+        width: img.width,
+        height: img.height,
+        scale,
+        bgra: &img.bgra,
+    })?;
+    window.show();
+
+    let events: Rc<RefCell<VecDeque<PointerEvent>>> = Rc::new(RefCell::new(VecDeque::new()));
+    {
+        let q = events.clone();
+        window.set_pointer_handler(Rc::new(move |ev: PointerEvent| {
+            q.borrow_mut().push_back(ev);
+        }));
+    }
+    Ok(Some(make_pin(
+        window,
+        CapturedImage {
+            width: img.width,
+            height: img.height,
+            scale,
+            bgra: img.bgra,
+        },
+        events,
+    )))
+}
+
 /// 保存对话框里预填的文件名。
 fn default_file_name() -> String {
     let stamp = SystemTime::now()
@@ -653,9 +860,21 @@ fn save_to_desktop(img: &CapturedImage) -> Result<PathBuf, Box<dyn std::error::E
     Ok(path)
 }
 
-/// 走一遍完整流程：铺遮罩 → 等框选 → 捕获 → 贴图。
+/// 走一遍捕获流程：铺遮罩 → 等框选 → 捕获 → 交出一张**暂存中**的贴图。
 ///
 /// 返回 `Ok(None)` 表示用户取消。
+///
+/// # 为什么标注发生在贴图上，而不是遮罩上
+///
+/// 竞品（Snipaste）是在框选完的遮罩上直接标注的。此处换了个做法：框选一
+/// 结束就立刻捕获，并把贴图**严丝合缝地摆在选区原位**，标注照旧发生在贴图
+/// 上。用户看到的完全一样 —— 那块画面本就静止，贴的是它自己的截图。
+///
+/// 这样做省下了在遮罩层重写一整套标注渲染与交互（贴图那边已经有了），
+/// 代价是选区框定后不能再拖边调整。
+///
+/// 遮罩**不撤**，继续压暗四周：那圈暗色是在提示「你还在一次截图流程里」，
+/// 少了它，用户不会知道此刻 Enter 有特殊含义。
 ///
 /// # 为什么用事件队列而不是在回调里直接驱动状态机
 ///
@@ -666,7 +885,7 @@ fn save_to_desktop(img: &CapturedImage) -> Result<PathBuf, Box<dyn std::error::E
 /// 改为「回调只入队、主循环消费」后：所有权是单向的
 /// （overlays 持有闭包，闭包持有队列），无环；状态机成为主循环的
 /// 局部变量，也不再需要 `RefCell`，顺带消除了嵌套借用 panic 的可能。
-fn capture_and_pin(
+fn capture_and_stage(
     app: &NSApplication,
     platform: &dyn Platform,
     capturer: &dyn Capturer,
@@ -724,13 +943,25 @@ fn capture_and_pin(
         }
     }
 
-    overlays.hide();
-    // 必须显式关闭：遮罩每次截图都会重建，只隐藏会持续累积
-    overlays.close();
-
     let Some(sel) = result else {
+        overlays.hide();
+        // 必须显式关闭：遮罩每次截图都会重建，只隐藏会持续累积
+        overlays.close();
         return Ok(None);
     };
+
+    // 框选阶段的事件队列到此为止。换成只认「右键放弃」的回调 ——
+    // 既避免事件在无人消费的队列里越积越多，也给键盘失灵时留一个逃生口。
+    let staging_cancel: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    {
+        let flag = staging_cancel.clone();
+        overlays.set_pointer_handler(Rc::new(move |ev: PointerEvent| {
+            if matches!(ev, PointerEvent::Cancel) {
+                flag.set(true);
+            }
+        }));
+    }
+    overlays.set_selection(Some(sel.rect));
 
     let img = capture_selection(capturer, &sel)?;
     // 贴在原位置：视觉上就像把那块画面「冻结」在了原地
@@ -746,6 +977,7 @@ fn capture_and_pin(
         scale: img.scale,
         bgra: &img.bgra,
     })?;
+    // 后于遮罩置顶，从而盖在镂空之上（两者同为 1000 层，靠顺序定胜负）
     pin.show();
     // 标注事件队列在建窗时就装好，进入标注模式时无需再改回调
     let events: Rc<RefCell<VecDeque<PointerEvent>>> = Rc::new(RefCell::new(VecDeque::new()));
@@ -756,28 +988,11 @@ fn capture_and_pin(
         }));
     }
 
-    let keys: Rc<RefCell<VecDeque<KeyPress>>> = Rc::new(RefCell::new(VecDeque::new()));
-    {
-        let q = keys.clone();
-        pin.set_key_handler(Rc::new(move |k: KeyPress| {
-            q.borrow_mut().push_back(k);
-        }));
-    }
-
-    let pending_tool: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
-    {
-        let slot = pending_tool.clone();
-        pin.set_toolbar_handler(Rc::new(move |id: u32| slot.set(Some(id))));
-    }
-
-    Ok(Some(Pin {
-        window: pin,
-        image: img,
-        editor: AnnotationEditor::new(),
-        events,
-        pending_tool,
-        editing_text: None,
-        editing_last: String::new(),
-        keys,
-    }))
+    let mut staged = make_pin(pin, img, events);
+    staged.staging = true;
+    staged.overlays = Some(overlays);
+    staged.staging_cancel = staging_cancel;
+    // 框选完直接就能画，不必再按一次空格
+    staged.set_annotation_mode(true);
+    Ok(Some(staged))
 }

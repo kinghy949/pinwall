@@ -86,8 +86,16 @@ impl Rgba {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DrawCommand {
     Rect { rect: Rect, color: Rgba, width: f64 },
+    /// 内切于 `rect` 的椭圆。
+    Ellipse { rect: Rect, color: Rgba, width: f64 },
+    /// 不带箭头的直线。
+    Line { from: Point, to: Point, color: Rgba, width: f64 },
     Arrow { from: Point, to: Point, color: Rgba, width: f64 },
     Text { origin: Point, text: String, color: Rgba, size: f64 },
+    /// 荧光笔式半透明色块。盖住但不遮蔽，底下的内容仍可辨认。
+    Highlight { rect: Rect },
+    /// 步骤序号：实心圆点 + 居中白色数字，圆心与直径由 `rect` 定。
+    Number { rect: Rect, value: u32, color: Rgba },
     /// 对该区域做马赛克遮蔽。像素处理由窗口层完成，
     /// 因为只有它持有底图。
     Redact { rect: Rect },
@@ -130,6 +138,8 @@ pub enum KeyPress {
     /// 与 [`Self::Command`] 分开是必需的：`charactersIgnoringModifiers` 对
     /// ⌘S 与 ⌘⇧S 给出的是同一个字母，不看修饰键就分不出「存储为」和「快速保存」。
     CommandShift(char),
+    /// 回车。`shift` 区分「确认」与「确认并保留」两种收尾。
+    Enter { shift: bool },
     Escape,
 }
 
@@ -160,6 +170,16 @@ pub struct PinImage<'a> {
     /// 从而在 Retina 屏上呈现为原始大小而非两倍放大。
     pub scale: f64,
     pub bgra: &'a [u8],
+}
+
+/// 从系统剪贴板读出的一张位图。
+///
+/// 与 [`PinImage`] 的区别只在所有权：那个是借用视图，这个自带缓冲区。
+pub struct ClipboardImage {
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
+    pub bgra: Vec<u8>,
 }
 
 /// 贴图浮窗：置顶、可跨 Space、可覆盖其他应用的全屏窗口。
@@ -282,6 +302,9 @@ pub trait Platform {
     fn create_pin(&self, frame: Rect) -> Result<Box<dyn PinWindow>>;
 
     fn create_overlay(&self, screen: &ScreenInfo) -> Result<Box<dyn Overlay>>;
+
+    /// 当前鼠标位置（本项目全局坐标）。用于决定剪贴板贴图落在哪。
+    fn cursor_position(&self) -> Option<Point>;
 }
 
 /// 覆盖全部显示器的遮罩集合。
@@ -354,4 +377,7 @@ impl OverlaySet {
 }
 
 mod backend;
-pub use backend::{ask_save_path, copy_image_to_clipboard, current_platform, flatten_annotations};
+pub use backend::{
+    ask_save_path, copy_image_to_clipboard, current_platform, flatten_annotations,
+    read_clipboard_image,
+};

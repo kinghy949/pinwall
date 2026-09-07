@@ -21,14 +21,24 @@ const HANDLE_RADIUS: f64 = 7.0;
 const MIN_TEXT_SIZE: Size = Size::new(12.0, 14.0);
 /// 新建文字对象时输入框的初始大小。内容超出后由平台层实测值接管。
 const TEXT_BOX_HINT: Size = Size::new(160.0, 24.0);
+/// 序号圆点的半径。点一下即定尺寸，不随拖拽变化。
+const NUMBER_RADIUS: f64 = 13.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Select,
     Rect,
+    /// 椭圆。内切于拖出的矩形。
+    Ellipse,
+    /// 不带箭头的直线。
+    Line,
     Arrow,
+    /// 荧光笔式高亮：半透明色块，盖住但不遮蔽。
+    Highlight,
     /// 打码遮蔽。
     Redact,
+    /// 步骤序号：点一下放一个带数字的圆点，数字自动递增。
+    Number,
     Text,
 }
 
@@ -51,10 +61,16 @@ impl Color {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
     Rect,
+    Ellipse,
+    Line,
     Arrow,
     Text(String),
+    /// 半透明高亮色块。与 [`Self::Redact`] 的区别是**不遮蔽**内容。
+    Highlight,
     /// 马赛克/模糊打码。渲染层据此对该区域做像素处理。
     Redact,
+    /// 步骤序号，内含它显示的数字。
+    Number(u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,8 +96,8 @@ impl Annotation {
     /// 这是把 immediate mode 用于可编辑矢量对象时的主要成本。
     pub fn hit(&self, p: Point) -> bool {
         match self.shape {
-            // 箭头是一条线段，按包围盒判定会让斜箭头旁边一大片空白都算命中
-            Shape::Arrow => {
+            // 线段类按包围盒判定会让斜线旁边一大片空白都算命中
+            Shape::Arrow | Shape::Line => {
                 distance_to_segment(p, self.a, self.b) <= self.width.max(HIT_TOLERANCE)
             }
             _ => {
@@ -101,7 +117,9 @@ impl Annotation {
         match self.shape {
             // 文字对象只要有内容就有意义，不按尺寸判定
             Shape::Text(ref s) => s.trim().is_empty(),
-            Shape::Arrow => (self.b - self.a).length() < MIN_SIZE,
+            // 序号是点一下就定尺寸的，永远不算误触
+            Shape::Number(_) => false,
+            Shape::Arrow | Shape::Line => (self.b - self.a).length() < MIN_SIZE,
             _ => {
                 let b = self.bounds();
                 b.size.width < MIN_SIZE || b.size.height < MIN_SIZE
@@ -138,6 +156,11 @@ enum Drag {
 pub struct AnnotationDoc {
     pub objects: Vec<Annotation>,
     pub selected: Option<usize>,
+    /// 下一个序号标记要显示的数字。
+    ///
+    /// 存在文档里而非编辑器里，是为了让撤销一并把它退回去 ——
+    /// 否则撤掉「3」之后再放一个，会得到第二个「4」。
+    pub next_number: u32,
 }
 
 /// 快照式撤销栈。
@@ -350,6 +373,21 @@ impl AnnotationEditor {
                 };
                 EditOutcome::Redraw
             }
+            Tool::Number => {
+                let n = self.doc.next_number.max(1);
+                self.doc.next_number = n + 1;
+                self.doc.objects.push(Annotation {
+                    shape: Shape::Number(n),
+                    a: Point::new(p.x - NUMBER_RADIUS, p.y - NUMBER_RADIUS),
+                    b: Point::new(p.x + NUMBER_RADIUS, p.y + NUMBER_RADIUS),
+                    color: self.color,
+                    width: self.width,
+                });
+                self.doc.selected = Some(self.doc.objects.len() - 1);
+                // 点一下即成型，没有拖拽阶段，故就地提交
+                self.history.commit(&self.doc);
+                EditOutcome::Redraw
+            }
             Tool::Text => {
                 self.doc.objects.push(Annotation {
                     shape: Shape::Text(String::new()),
@@ -365,7 +403,10 @@ impl AnnotationEditor {
             tool => {
                 let shape = match tool {
                     Tool::Rect => Shape::Rect,
+                    Tool::Ellipse => Shape::Ellipse,
+                    Tool::Line => Shape::Line,
                     Tool::Arrow => Shape::Arrow,
+                    Tool::Highlight => Shape::Highlight,
                     _ => Shape::Redact,
                 };
                 self.doc.objects.push(Annotation {
@@ -623,6 +664,34 @@ mod tests {
         e.set_text(i, "l".into(), Some(Size::new(1.0, 2.0)));
         let b = e.objects()[i].bounds();
         assert!(b.size.width >= MIN_TEXT_SIZE.width && b.size.height >= MIN_TEXT_SIZE.height);
+    }
+
+    /// 序号点一下就成型，且数字自增；撤销要把计数一并退回，
+    /// 否则撤掉「1」之后再放会得到「2」。
+    #[test]
+    fn number_tool_increments_and_undo_rewinds_counter() {
+        let mut e = AnnotationEditor::new();
+        e.set_tool(Tool::Number);
+        e.handle(EditEvent::Down(p(10.0, 10.0)));
+        e.handle(EditEvent::Down(p(50.0, 50.0)));
+        assert_eq!(e.objects()[0].shape, Shape::Number(1));
+        assert_eq!(e.objects()[1].shape, Shape::Number(2));
+
+        assert!(e.undo());
+        assert_eq!(e.objects().len(), 1);
+        e.handle(EditEvent::Down(p(90.0, 90.0)));
+        assert_eq!(e.objects()[1].shape, Shape::Number(2), "撤销后应重新发 2 而非 3");
+    }
+
+    /// 直线与箭头同样按线段距离命中，不能退回包围盒判定。
+    #[test]
+    fn line_hit_uses_segment_distance() {
+        let mut e = AnnotationEditor::new();
+        e.set_tool(Tool::Line);
+        drag(&mut e, p(0.0, 0.0), p(100.0, 100.0));
+        let line = &e.objects()[0];
+        assert!(line.hit(p(50.0, 50.0)));
+        assert!(!line.hit(p(95.0, 5.0)), "包围盒内但远离线段，不应命中");
     }
 
     #[test]

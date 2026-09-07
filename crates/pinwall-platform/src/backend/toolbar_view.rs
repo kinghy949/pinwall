@@ -17,7 +17,7 @@ use objc2_foundation::{MainThreadMarker, NSDictionary, NSPoint, NSRect, NSSize, 
 use crate::{ToolbarHandler, ToolbarItem};
 
 /// 单个按钮的尺寸与间距（逻辑点）。
-pub const BUTTON_W: f64 = 52.0;
+pub const BUTTON_W: f64 = 44.0;
 pub const BUTTON_H: f64 = 26.0;
 pub const PADDING: f64 = 5.0;
 const CORNER: f64 = 5.0;

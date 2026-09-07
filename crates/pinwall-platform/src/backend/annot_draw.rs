@@ -93,6 +93,51 @@ pub fn draw(ctx: &CGContext, cmds: &[DrawCommand], logical_height: f64, scale: f
                     CGContext::fill_path(Some(ctx));
                 }
             }
+            DrawCommand::Ellipse { rect, color, width } => {
+                set_stroke(ctx, *color);
+                CGContext::set_line_width(Some(ctx), *width);
+                CGContext::stroke_ellipse_in_rect(Some(ctx), flip(rect, &fy));
+            }
+            DrawCommand::Line { from, to, color, width } => {
+                set_stroke(ctx, *color);
+                CGContext::set_line_width(Some(ctx), *width);
+                CGContext::begin_path(Some(ctx));
+                CGContext::move_to_point(Some(ctx), from.x, fy(from.y));
+                CGContext::add_line_to_point(Some(ctx), to.x, fy(to.y));
+                CGContext::stroke_path(Some(ctx));
+            }
+            DrawCommand::Highlight { rect } => {
+                // 固定用荧光黄，不跟随标注色 —— 高亮的语义就是荧光笔，
+                // 红色半透明块看着像出错提示而非强调。
+                CGContext::set_rgb_fill_color(Some(ctx), 1.0, 0.85, 0.1, 0.35);
+                CGContext::fill_rect(Some(ctx), flip(rect, &fy));
+            }
+            DrawCommand::Number { rect, value, color } => {
+                let r = flip(rect, &fy);
+                set_fill(ctx, *color);
+                CGContext::fill_ellipse_in_rect(Some(ctx), r);
+                // 白圈让序号在深色截图上也能与背景分开
+                CGContext::set_rgb_stroke_color(Some(ctx), 1.0, 1.0, 1.0, 0.9);
+                CGContext::set_line_width(Some(ctx), 1.5);
+                CGContext::stroke_ellipse_in_rect(Some(ctx), inset(r, 0.75));
+
+                let s = NSString::from_str(&value.to_string());
+                let size = r.size.height * 0.6;
+                let font = NSFont::boldSystemFontOfSize(size);
+                let fg = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 1.0);
+                let attrs = NSDictionary::from_slices(
+                    &[unsafe { NSFontAttributeName }, unsafe {
+                        NSForegroundColorAttributeName
+                    }],
+                    &[&*font as &objc2::runtime::AnyObject, &*fg],
+                );
+                let m = unsafe { s.sizeWithAttributes(Some(&attrs)) };
+                let point = NSPoint::new(
+                    r.origin.x + (r.size.width - m.width) / 2.0,
+                    r.origin.y + (r.size.height - m.height) / 2.0,
+                );
+                unsafe { s.drawAtPoint_withAttributes(point, Some(&attrs)) };
+            }
             DrawCommand::Redact { rect } => {
                 // 以不透明纯色遮蔽。真正的马赛克需要读回底图像素，
                 // 而纯色遮挡在防泄露上更彻底 —— 马赛克有被复原的先例。

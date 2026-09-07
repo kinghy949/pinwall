@@ -18,4 +18,7 @@ impl Platform for StubPlatform {
     fn create_overlay(&self, _screen: &ScreenInfo) -> Result<Box<dyn Overlay>> {
         Err(Error::Unsupported("create_overlay"))
     }
+    fn cursor_position(&self) -> Option<crate::geom::Point> {
+        None
+    }
 }

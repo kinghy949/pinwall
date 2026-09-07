@@ -129,6 +129,13 @@ impl Platform for MacPlatform {
         }))
     }
 
+    fn cursor_position(&self) -> Option<Point> {
+        // NSEvent::mouseLocation 给的是 Cocoa 全局坐标（主屏左下角原点、
+        // y 向上），翻成本 crate 的约定
+        let p = objc2_app_kit::NSEvent::mouseLocation();
+        Some(Point::new(p.x, self.primary_height() - p.y))
+    }
+
     fn create_overlay(&self, screen: &ScreenInfo) -> Result<Box<dyn Overlay>> {
         let cocoa = self.to_cocoa(screen.frame);
         let panel = make_panel(self.mtm, cocoa, false);
