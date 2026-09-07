@@ -184,6 +184,13 @@ pub struct ClipboardImage {
 
 /// 贴图浮窗：置顶、可跨 Space、可覆盖其他应用的全屏窗口。
 pub trait PinWindow {
+    /// 主动取得键盘焦点（并激活本应用）。
+    ///
+    /// 不调用它，窗口要等用户**点一下**才拿得到焦点，在那之前 ⌘C、
+    /// 单字母工具键、Esc 全部收不到。刚截完的图正处在「手已经离开鼠标」
+    /// 的时刻，最需要的恰恰是不点也能按键。
+    fn focus(&self);
+
     /// 设置窗口显示的图像。窗口尺寸会按图像的逻辑尺寸调整。
     fn set_image(&self, image: &PinImage<'_>) -> Result<()>;
 

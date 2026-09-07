@@ -10,7 +10,8 @@ use objc2::rc::Retained;
 use std::cell::{Cell, RefCell};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSPanel, NSScreen, NSWindowCollectionBehavior,
+    NSBackingStoreType, NSColor, NSPanel, NSScreen, NSWindowAnimationBehavior,
+    NSWindowCollectionBehavior,
     NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -86,6 +87,10 @@ fn make_panel(mtm: MainThreadMarker, cocoa_frame: NSRect, opaque: bool) -> Retai
     );
     panel.setFloatingPanel(true);
     panel.setHidesOnDeactivate(false);
+    // 关掉窗口的显隐动画。默认行为下 orderOut: 是**淡出**的，而遮罩要在快门
+    // 前一刻撤下屏 —— 带动画就会被拍到淡出中途，在截图边缘留下一圈半透明的
+    // 红（见 examples/edge_probe 的实测）。
+    panel.setAnimationBehavior(NSWindowAnimationBehavior::None);
     panel.setOpaque(opaque);
     panel.setLevel(OVERLAY_LEVEL);
     panel.setCollectionBehavior(
@@ -206,6 +211,13 @@ impl PinWindow for MacPin {
 
     fn show(&self) {
         self.panel.orderFrontRegardless();
+    }
+
+    fn focus(&self) {
+        // 与用户点击贴图时走的是同一条路径，故行为一致
+        if let Some(v) = self.view.borrow().as_ref() {
+            v.focus_window();
+        }
     }
 
     fn hide(&self) {

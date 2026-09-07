@@ -359,7 +359,7 @@ impl PinView {
     /// 光让窗口成为 key window 是不够的。代价是点击贴图会抢走用户
     /// 原本应用的焦点 —— 这是把工具键从全局热键里摘出来所必须付的账，
     /// 也是 Snipaste 一类竞品的一致做法。
-    fn focus_window(&self) {
+    pub(super) fn focus_window(&self) {
         let Some(mtm) = MainThreadMarker::new() else { return };
         let Some(w) = self.window() else { return };
         if !w.isKeyWindow() {

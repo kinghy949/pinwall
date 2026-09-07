@@ -9,7 +9,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
@@ -33,6 +33,11 @@ use pinwall_platform::{
     read_clipboard_image, DrawCommand, KeyPress, OverlaySet, PinImage, PinWindow, Platform,
     PointerEvent, Rgba, ToolbarItem,
 };
+
+/// 撤下遮罩后等待窗口服务器完成一次合成的时长。
+///
+/// 这是个经验值：要盖住一帧的合成（60Hz 下约 17ms），又不能让用户觉出卡顿。
+const OVERLAY_SETTLE: Duration = Duration::from_millis(60);
 
 fn main() {
     let mtm = MainThreadMarker::new().expect("须在主线程运行");
@@ -99,18 +104,18 @@ PinWall  —— 把截图钉在屏幕上
   ⌘⇧E   进出标注模式（正常用空格，这是拿不到焦点时的保底通路）
   Ctrl-C 退出
 
-贴图窗口内（先点一下贴图使其取得焦点）
+贴图窗口内（刚截的图已自动取得焦点；旧贴图需先点一下）
   空格   显隐标注工具栏（进出标注模式）
   V 选择   R 矩形   O 椭圆   L 直线   A 箭头
   H 高亮   B 打码   N 序号   T 文字
   ⌘Z     撤销标注
-  ⌘C     复制到剪贴板（含标注）
+  ⌘C     复制到剪贴板（含标注）；暂存期同时收工，见下
   ⌘S     存储为…（弹对话框选位置，含标注）
   ⌘⇧S    快速保存到桌面（不打断，含标注）
   Esc    标注模式下退出标注；否则关闭该贴图
 
 刚框选完处于「暂存」状态，四周仍压暗：
-  Enter   烧入标注 → 进剪贴板 → 收工，不留窗口
+  Enter   烧入标注 → 进剪贴板 → 收工，不留窗口（⌘C 亦同）
   ⇧Enter  烧入标注 → 留成置顶浮窗
   Esc     放弃本次截图（在压暗区右键亦可）
 
@@ -122,7 +127,7 @@ PinWall  —— 把截图钉在屏幕上
 
 标注模式下贴图下方会浮出工具栏，可直接点击切换工具，不依赖键盘。
 文字工具：点一下即就地弹出输入框（支持输入法），回车或点别处提交。
-拖拽绘制，右键删除选中。截图完成后会自动复制到剪贴板。
+拖拽绘制，右键删除选中。截图不会自动进剪贴板，按 Enter 或 ⌘C 才复制。
 
 已就绪。
 "#
@@ -256,7 +261,7 @@ PinWall  —— 把截图钉在屏幕上
                     Ok(Some(pin)) => {
                         pins.push(pin);
                         println!(
-                            "已框选，可直接标注：Enter 复制并收工 · ⇧Enter 贴在屏幕上 · Esc 放弃"
+                            "已框选，可直接标注：Enter/⌘C 复制并收工 · ⇧Enter 贴在屏幕上 · Esc 放弃"
                         );
                     }
                     Ok(None) => println!("已取消"),
@@ -346,7 +351,7 @@ struct Pin {
     editing_last: String,
     /// 暂存期：刚框选完、尚未决定去留。
     ///
-    /// 此时 Enter 表示「复制并收工」，⇧Enter 表示「留成贴图」，Esc 放弃。
+    /// 此时 Enter（或 ⌘C）表示「复制并收工」，⇧Enter 表示「留成贴图」，Esc 放弃。
     /// 落定之后这三个键的含义都不一样了，故必须区分。
     staging: bool,
     /// 暂存期仍然铺着的遮罩。压暗周围是在提示「你还在一次截图流程里」，
@@ -644,7 +649,16 @@ impl Pin {
                         dirty = true;
                     }
                 }
-                KeyPress::Command('c') => actions.push(PinAction::Copy),
+                // 暂存期的 ⌘C 与 Enter 同义：复制走人就是这次截图的终点，
+                // 再要用户补按一次 Esc 收窗是多余的一步。落定之后的贴图则
+                // 只复制不关 —— 那是用户特意留在屏幕上的，关掉才是意外。
+                KeyPress::Command('c') => {
+                    // 顺序有意义：先复制，再关窗
+                    actions.push(PinAction::Copy);
+                    if self.staging {
+                        actions.push(PinAction::Close);
+                    }
+                }
                 // ⌘S 存储为、⌘⇧S 快速保存 —— 对齐 Snipaste 的既有分工。
                 // 无提示地丢进固定目录，从用户视角与「快捷键坏了」无法区分。
                 KeyPress::Command('s') => actions.push(PinAction::SaveAs),
@@ -860,6 +874,33 @@ fn save_to_desktop(img: &CapturedImage) -> Result<PathBuf, Box<dyn std::error::E
     Ok(path)
 }
 
+/// 把遮罩撤下屏，并等到窗口服务器真的把它从画面里去掉为止。
+///
+/// `orderOut:` 只是提交请求，合成是异步的。快门若抢在合成之前按下，拍到的
+/// 依然是遮罩 —— 这正是「已经 hide 了却仍有红边」的成因，且因为赶上的是
+/// 淡出动画的中途，红色还变成了半透明的粉（见 examples/edge_probe 的实测：
+/// 纯红 rgba(255,64,54) 变成了 rgba(212,148,143)）。
+///
+/// 动画本身已在 make_panel 里关掉，此处再泵一小段事件，把余下的一次合成
+/// 也等掉。代价是每次截图多出这点延迟，换取图边干净。
+fn hide_and_settle(app: &NSApplication, overlays: &OverlaySet) {
+    overlays.hide();
+    let deadline = Instant::now() + OVERLAY_SETTLE;
+    while Instant::now() < deadline {
+        let until = NSDate::dateWithTimeIntervalSinceNow(0.005);
+        if let Some(e) = unsafe {
+            app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                NSEventMask::Any,
+                Some(&until),
+                NSDefaultRunLoopMode,
+                true,
+            )
+        } {
+            app.sendEvent(&e);
+        }
+    }
+}
+
 /// 走一遍捕获流程：铺遮罩 → 等框选 → 捕获 → 交出一张**暂存中**的贴图。
 ///
 /// 返回 `Ok(None)` 表示用户取消。
@@ -961,9 +1002,16 @@ fn capture_and_stage(
             }
         }));
     }
-    overlays.set_selection(Some(sel.rect));
-
+    // 快门期间遮罩**必须真的离屏**。SCScreenshotManager 拍的是屏幕的合成
+    // 结果，遮罩还铺着就会被一并拍进去。
+    //
+    // 光靠镂空躲不掉：捕获区域与选区并不严丝合缝 —— 实测（examples/edge_probe）
+    // 选区描边有整整 2 物理像素落在图里，左、右、下三边都有而上边没有，可见
+    // 捕获区是按像素边界外扩过的，并非简单地半条线骑在边界上。既然对不齐，
+    // 就没有任何描边位置是安全的，唯一可靠的做法是让遮罩在快门时不在场。
+    hide_and_settle(app, &overlays);
     let img = capture_selection(capturer, &sel)?;
+
     // 贴在原位置：视觉上就像把那块画面「冻结」在了原地
     let pin = platform.create_pin(Rect::from_xywh(
         sel.rect.origin.x,
@@ -977,8 +1025,14 @@ fn capture_and_stage(
         scale: img.scale,
         bgra: &img.bgra,
     })?;
+    // 图已到手，遮罩回到屏上继续压暗四周，标示仍在暂存期
+    overlays.set_selection(Some(sel.rect));
+    overlays.show();
     // 后于遮罩置顶，从而盖在镂空之上（两者同为 1000 层，靠顺序定胜负）
     pin.show();
+    // 主动取焦点，不等用户点。刚框完选，手已经离开鼠标，此时最该能直接按
+    // ⌘C / Enter / Esc —— 还要求先点一下贴图，等于把最顺的那一步堵上了。
+    pin.focus();
     // 标注事件队列在建窗时就装好，进入标注模式时无需再改回调
     let events: Rc<RefCell<VecDeque<PointerEvent>>> = Rc::new(RefCell::new(VecDeque::new()));
     {
