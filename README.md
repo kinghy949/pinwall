@@ -2,120 +2,115 @@
 
 # PinWall
 
-**把截图钉在屏幕上。**
+**Pin screenshots to your screen.**
 
-免费、开源、商用也免费的截图与贴图工具。
+[English](README.md) · [简体中文](README.zh-CN.md)
 
-`macOS 可用` · `Windows 开发中` · `Rust · 无 Electron · 常驻内存目标 < 30MB`
+Free, open-source screenshot and image-pinning software — free for commercial use, too.
+
+`Available on macOS` · `Windows in development` · `Rust · no Electron · target resident memory < 30 MB`
 
 </div>
 
 ---
 
-对着设计稿写代码、照着报错查文档、比对两版数据 —— 这些时候你需要的不是「截一张图存起来」，
-而是**把那块画面留在眼前**。
+When you are coding from a design, reading an error while consulting documentation, or comparing two sets of data, you do not need to save a screenshot somewhere. You need to **keep that piece of the screen in view**.
 
-PinWall 按一次 F1 框选，截下来的图**就地变成一个置顶浮窗**，浮在所有窗口之上，
-跟着你切换应用、切换 Space。要标注就直接画，要复制就按一下回车，不想留就按 Esc。
+Press F1, drag out a region, and PinWall turns it into an always-on-top floating image right where it was captured. It stays above your apps and Spaces. Draw on it when needed, press Return to copy it, or press Esc to discard it.
 
-![PinWall 暂存期：四周压暗，截图停在原位，工具栏浮在下方，图上已画了多种标注](docs/images/pinwall.png)
+![PinWall in its staging state: the area around the capture is dimmed, the image remains in place, and an annotation toolbar floats below it](docs/images/pinwall.png)
 
 <div align="center">
-<sub>刚按下 F1 框选完的样子：四周压暗提示你还在这次截图里，图停在原位可以直接开画，<br>
-工具栏浮在下方。图中可以看到矩形、椭圆、箭头、高亮、打码、序号与文字标注。</sub>
+<sub>Immediately after selecting an area with F1: the dimmed surroundings show that this capture is still in progress; draw directly on the image with the toolbar below it.</sub>
 </div>
 
-## 一次截图长什么样
+## A capture, end to end
 
 ```
-F1  →  拖拽框选  →  就地标注  →  Enter   复制走人，什么都不留
-                              ⇧Enter  留成置顶浮窗，继续对照
-                              Esc     放弃
+F1  →  drag to select  →  annotate in place  →  Return      copy it; leave nothing behind
+                                             ⇧Return     keep it as a pinned floating image
+                                             Esc         discard it
 ```
 
-关键在于**框选完并不立刻落定**。四周仍然压着暗色，提示你还在这次截图流程里 ——
-这段时间叫「暂存期」，图已经截好了、就摆在原位，标注工具栏已经浮出来，
-可以直接开画，不必先按什么键进入编辑模式。
+Selection does **not** finalize a capture immediately. The surrounding area remains dimmed to show that you are still in the capture flow. During this staging state, the image is already in place and the annotation toolbar is ready — no separate edit mode required.
 
-画完之后由你决定它的去向：
+Once you are done, choose where it goes:
 
-| 按键 | 去向 |
+| Key | Result |
 |---|---|
-| `Enter` / `⌘C` / 空白处双击 | 标注烧进像素 → 进剪贴板 → 收工，不留窗口 |
-| `⇧Enter` | 标注烧进像素 → 留成置顶浮窗 |
-| `Esc` / 压暗区右键 | 放弃这次截图 |
+| `Return` / `⌘C` / double-click empty space | Burn annotations into pixels, copy to the clipboard, and close — no window left behind |
+| `⇧Return` | Burn annotations into pixels and keep the result as a pinned floating image |
+| `Esc` / right-click the dimmed area | Discard this capture |
 
-绝大多数截图的归宿是「复制出去，粘到某处」，所以那条路径最短：**F1、框、回车**。
+Most screenshots are copied somewhere and pasted, so the common path is deliberately short: **F1, select, Return**.
 
-## 贴图能做什么
+## What pinned images can do
 
-贴图不是「一张停在那里的图」，它是可以参与工作的：
+A pin is not merely an image left on screen. It can take part in your work:
 
-- **拖拽**移动，**滚轮**以光标为锚点缩放，**Shift/Option + 滚轮**调透明度
-- **鼠标穿透**（中键，或 `⌘⇧T` 全局切换）—— 半透明地压在代码上当参考线，鼠标照常点到下面的编辑器
-- 跨 Space、覆盖全屏应用；多显示器之间随便拖
-- `F3` 把**剪贴板里的任何图**贴成浮窗 —— 从浏览器、聊天窗口复制来的图都行，不限于自家截图
-- 双击 = 复制并关闭（内容先落进剪贴板，不会误丢）；右键 = 直接丢弃
+- **Drag** to move it; use the **scroll wheel** to zoom around the pointer; use **Shift/Option + wheel** to adjust opacity.
+- Enable **mouse passthrough** (middle-click, or toggle all pins with `⌘⇧T`) to use a translucent pin as a guide over code while interacting normally with the editor beneath it.
+- Move pins freely across Spaces, full-screen apps, and displays.
+- Press `F3` to pin **any image on the clipboard** — copied from a browser or chat app, not only from PinWall.
+- Double-click to copy and close safely; right-click to discard directly.
 
-## 标注
+## Annotations
 
-九种工具，键盘和工具栏都能切。标注是**矢量对象**，画完还能选中、拖动、缩放、撤销；
-导出时才烧进像素。
+Nine tools are available from both the keyboard and toolbar. Annotations are **vector objects**: select, move, resize, and undo them after drawing; they are rasterized only when exporting.
 
 | | | | |
 |---|---|---|---|
-| `V` 选择 | `R` 矩形 | `O` 椭圆 | `L` 直线 |
-| `A` 箭头 | `H` 高亮 | `B` 打码 | `N` 序号 |
-| `T` 文字 | | | |
+| `V` Select | `R` Rectangle | `O` Ellipse | `L` Line |
+| `A` Arrow | `H` Highlight | `B` Redact | `N` Number |
+| `T` Text | | | |
 
-几个刻意的取舍：
+A few deliberate choices:
 
-- **打码用不透明纯色，不用马赛克。** 马赛克有被算法复原的先例，纯色遮挡在防泄露上更彻底。
-- **高亮固定荧光黄**，不跟随当前标注色 —— 高亮的语义就是荧光笔，红色半透明块看着像报错而不是强调。
-- **序号点一下就放一个**，数字自动递增；撤销会把计数一并退回，不会撤掉「3」之后再放出第二个「4」。
-- **文字走系统原生输入框**，输入法、候选词、双拼、emoji 面板全部照常可用。
+- **Redaction uses an opaque solid color, not mosaic blur.** Pixelation has been reconstructed by algorithms; an opaque cover is safer for sensitive information.
+- **Highlights are always fluorescent yellow**, independent of the active annotation color. A red translucent block reads as an error, not emphasis.
+- **Number markers increment automatically.** Undo also rolls back the counter, so undoing “3” does not create a second “4”.
+- **Text uses the system-native input field**, so IMEs, candidate panels, double-pinyin input, and the emoji picker work as expected.
 
-## 快捷键
+## Keyboard shortcuts
 
-**全局**（任何地方都生效）
+**Global** — available from anywhere
 
-| 键 | 作用 |
+| Key | Action |
 |---|---|
-| `F1` | 截图 |
-| `F3` | 把剪贴板里的图贴成浮窗 |
-| `⌘⇧X` | 关闭所有贴图 |
-| `⌘⇧T` | 切换所有贴图的鼠标穿透 |
-| `⌘⇧E` | 进出标注模式（焦点异常时的保底通路） |
+| `F1` | Capture a region |
+| `F3` | Pin an image from the clipboard |
+| `⌘⇧X` | Close all pins |
+| `⌘⇧T` | Toggle mouse passthrough for all pins |
+| `⌘⇧E` | Enter or leave annotation mode (a fallback when focus is unusual) |
 
-**贴图窗口内**（刚截的图已自动取得焦点；旧贴图需先点一下）
+**Inside a pin** — a new capture receives focus automatically; click an existing pin first
 
-| 键 | 作用 |
+| Key | Action |
 |---|---|
-| `空格` | 显隐标注工具栏 |
-| `V R O L A H B N T` | 切换标注工具 |
-| `⌘Z` | 撤销标注 |
-| `⌘C` | 复制到剪贴板（含标注） |
-| `⌘S` | 存储为…（弹对话框选位置） |
-| `⌘⇧S` | 快速保存到桌面，不打断 |
-| `Esc` | 先退出标注；再按才关闭贴图 |
+| `Space` | Show or hide the annotation toolbar |
+| `V R O L A H B N T` | Select an annotation tool |
+| `⌘Z` | Undo an annotation |
+| `⌘C` | Copy to the clipboard, including annotations |
+| `⌘S` | Save as… and choose a location |
+| `⌘⇧S` | Save quickly to the Desktop without interrupting work |
+| `Esc` | Leave annotation mode; press again to close the pin |
 
-**鼠标**
+**Mouse**
 
-| 操作 | 作用 |
+| Action | Result |
 |---|---|
-| 拖拽 | 移动 |
-| 滚轮 | 缩放（以光标为锚点） |
-| `Shift`/`Option` + 滚轮 | 调透明度 |
-| 中键 | 切换鼠标穿透 |
-| 双击 | 复制到剪贴板并关闭 |
-| 右键 | 直接关闭，不复制 |
+| Drag | Move the pin |
+| Scroll | Zoom around the pointer |
+| `Shift`/`Option` + scroll | Adjust opacity |
+| Middle-click | Toggle mouse passthrough |
+| Double-click | Copy to the clipboard and close |
+| Right-click | Close without copying |
 
-快捷键分「全局」和「窗口内」两层：全局键会从**所有**应用手里独占键位，能少占就少占，
-所以只留了五个；工具键这类高频操作放在贴图窗口内，按下去只影响当前这张图。
+Global shortcuts are deliberately scarce: they reserve keys across **all** apps. Frequent tool shortcuts stay within the focused pin, where they affect only the current image.
 
-## 安装与运行
+## Install and run
 
-目前只有命令行形态，尚未打包成 `.app`。
+PinWall is currently command-line only; it is not yet packaged as a `.app`.
 
 ```bash
 git clone https://github.com/kinghy949/pinwall.git
@@ -123,91 +118,84 @@ cd pinwall
 cargo run -p pinwall
 ```
 
-首次运行需要在 **系统设置 → 隐私与安全性 → 屏幕录制** 中授权，然后重新运行。
+On first run, grant **Screen Recording** permission in **System Settings → Privacy & Security → Screen Recording**, then run it again.
 
-> 需要 macOS 12.3 及以上（ScreenCaptureKit 的下限）。
+> Requires macOS 12.3 or later, the minimum version supported by ScreenCaptureKit.
 
-## 为什么再做一个截图工具
+## Why another screenshot tool?
 
-现有工具各有一块做到了极致，但没有一款把它们凑齐：
+Existing tools each excel at something, but none brings all of it together:
 
-| | 强在哪 | 缺什么 |
+| | Strength | Missing piece |
 |---|---|---|
-| **Snipaste** | 贴图体验无可替代 | 闭源，商用要付费，没有工作流 |
-| **ShareX** | 功能无敌，工作流强 | 只有 Windows，配置劝退 |
-| **CleanShot X** | 体验最精致 | 只有 macOS，付费 |
-| **Snagit** | 专业全面 | 订阅制，偏团队文档场景 |
-| **Lightshot** | 够快够简单 | 功能到此为止，维护停滞 |
-| **Greenshot** | 轻量稳妥 | UI 停在上个时代，macOS 版另收费 |
+| **Snipaste** | Exceptional pinning | Closed source, paid commercial use, no workflow automation |
+| **ShareX** | Powerful features and workflows | Windows-only and intimidating to configure |
+| **CleanShot X** | Highly polished experience | macOS-only and paid |
+| **Snagit** | Comprehensive professional tooling | Subscription model; oriented toward team documentation |
+| **Lightshot** | Fast and simple | Limited feature set and stalled maintenance |
+| **Greenshot** | Lightweight and dependable | Dated UI; macOS version costs extra |
 
-**没有任何一款同时提供「贴图」和「捕获后自动化工作流」。**
-Snipaste 有贴图没工作流，ShareX 有工作流没贴图且只有 Windows —— 这个交集就是 PinWall 的位置。
+**No other tool combines image pinning with automated post-capture workflows.** Snipaste has pinning without workflows; ShareX has workflows without pinning and only on Windows. PinWall lives in that intersection.
 
-明确**不做**的事，和要做的事同样重要：
+What PinWall deliberately does **not** do matters just as much:
 
-- **不做付费墙**：不设 Pro 版，不做功能阉割，不搞订阅，**商用同样免费**
-- **不做账号体系**：用截图工具不需要注册
-- **不做遥测**：默认不采集任何数据
-- **不强绑云**：本地优先，上传是可选且可自建的
-- **不做单平台**：Windows 与 macOS 一等公民，行为与快捷键保持一致
+- **No paywall:** no Pro tier, feature gating, or subscription; commercial use remains free.
+- **No accounts:** a screenshot tool should not require registration.
+- **No telemetry:** no data collection by default.
+- **No forced cloud:** local-first; uploads are optional and self-hosting is supported.
+- **No single-platform future:** Windows and macOS are first-class, with consistent behavior and shortcuts.
 
-> **平台说明**：Linux 为实验性支持，仅覆盖 X11 / XWayland。Wayland 从协议层面禁止客户端设置窗口位置，
-> 而贴图恰恰依赖任意坐标定位，详见 [MVP 风险评估](docs/mvp-risks.md#r1-wayland-上贴图基本无法实现--linux-必须降级)。
+> **Platform note:** Linux is experimental and limited to X11 / XWayland. Wayland disallows client-controlled window placement at the protocol level, while arbitrary positioning is essential to pinning. See the [MVP risk assessment](docs/mvp-risks.md#r1-wayland-上贴图基本无法实现--linux-必须降级) for details (currently in Chinese).
 
-## 进度
+## Progress
 
-**macOS 上已经能完整跑通，Windows 与 Linux 尚未开工。**
+**The full flow works on macOS. Windows and Linux have not yet begun.**
 
-MVP：
+MVP:
 
-- [x] 区域捕获与多显示器捕获（可跨屏框选，分屏取像后拼接）
-- [x] **贴图**：置顶浮窗，支持缩放、透明度、鼠标穿透、跨屏拖动
-- [x] 从剪贴板贴图（`F3`）
-- [x] 标注：矩形、椭圆、直线、箭头、高亮、打码、序号、文字
-- [x] 标注烧进像素后导出（复制 / 存储为 / 快速保存）
-- [x] 全局快捷键
-- [ ] 窗口捕获 / 全屏捕获
-- [ ] 贴图分组
-- [ ] Windows 后端
-- [ ] 应用打包（`.app` / 安装器）
+- [x] Region and multi-display capture (including cross-display selection, capture, and compositing)
+- [x] **Pinning:** always-on-top floating windows with zoom, opacity, mouse passthrough, and cross-display dragging
+- [x] Pin an image from the clipboard (`F3`)
+- [x] Annotations: rectangle, ellipse, line, arrow, highlight, redaction, number, and text
+- [x] Rasterized annotated exports (copy / Save As / quick save)
+- [x] Global keyboard shortcuts
+- [ ] Window capture / full-screen capture
+- [ ] Pin groups
+- [ ] Windows backend
+- [ ] Application packaging (`.app` / installer)
 
-之后：
+Later:
 
-- [ ] 截图历史：卡片时间线 + 全文检索
-- [ ] 可编排的捕获后工作流
-- [ ] 滚动长截图
-- [ ] OCR 文字提取
-- [ ] 插件 API（上传目标与集成由社区扩展）
-- [ ] 录屏与 GIF 导出
-- [ ] 自定义上传目标（S3 / WebDAV / 自定义 HTTP）
-- [ ] 配置跨设备同步
+- [ ] Screenshot history: card timeline and full-text search
+- [ ] Composable post-capture workflows
+- [ ] Scrolling screenshots
+- [ ] OCR text extraction
+- [ ] Plugin API (the community can extend upload targets and integrations)
+- [ ] Screen recording and GIF export
+- [ ] Custom upload targets (S3 / WebDAV / custom HTTP)
+- [ ] Cross-device settings sync
 
-## 技术
+## Technology
 
-性能是硬性约束，不是优化项：**常驻内存 < 30MB，快捷键到选区遮罩 < 50ms**。
+Performance is a hard constraint, not an optimization: **resident memory < 30 MB; hotkey-to-selection-overlay < 50 ms**.
 
-- **纯 Rust**，不使用 WebView。明确否掉了 Electron（常驻 150MB+）与 Tauri（WebView 进程常驻 60–100MB，冷启动延迟不适合热路径）
-- 窗口与绘制直接走平台原生 API。macOS 上是 `NSPanel` + CoreGraphics 直绘 ——
-  选型文档原本推荐 `egui` / `wgpu`，但遮罩与标注实际只需要「几个矩形加一行字」，
-  为此背上一整个 GUI 框架并不划算
-- 屏幕捕获走原生 API（ScreenCaptureKit / Windows.Graphics.Capture / PipeWire）
-- 常驻进程只保留快捷键与托盘，其余能力按需加载
+- **Pure Rust**, with no WebView. Electron (150 MB+ resident memory) and Tauri (60–100 MB of resident WebView process memory plus cold-start delay) are intentionally excluded from this hot path.
+- Windows and drawing use native platform APIs directly. On macOS, that is `NSPanel` + direct CoreGraphics rendering. The original selection considered `egui` / `wgpu`, but a capture overlay and annotations need only a few rectangles and text — not a full GUI framework.
+- Screen capture uses native APIs: ScreenCaptureKit / Windows.Graphics.Capture / PipeWire.
+- The resident process keeps only hotkeys and the tray alive; other capabilities load on demand.
 
-分层：`pinwall-core`（无平台依赖的状态机与标注模型）、`pinwall-capture`（捕获与编码）、
-`pinwall-platform`（窗口、绘制、剪贴板等平台实现）、`pinwall`（应用装配）。
-Windows 后端要填的 trait 与占位实现都已经留好。
+The architecture is split into `pinwall-core` (platform-independent state machine and annotation model), `pinwall-capture` (capture and encoding), `pinwall-platform` (windows, drawing, clipboard, and other platform integrations), and `pinwall` (application composition). Traits and placeholder implementations for the Windows backend are already in place.
 
-## 文档
+## Documentation
 
-- [竞品调研：主流截图工具 Top 5](docs/research.md)
-- [技术选型](docs/tech-stack.md)
-- [MVP 风险评估](docs/mvp-risks.md)
+- [Competitor research: top five screenshot tools](docs/research.md) (Chinese)
+- [Technology choices](docs/tech-stack.md) (Chinese)
+- [MVP risk assessment](docs/mvp-risks.md) (Chinese)
 
-## 参与贡献
+## Contributing
 
-现阶段最有价值的贡献是想法：你最离不开哪个工具的哪个功能？哪些设计让你觉得是负担？
-欢迎开 Issue。
+At this stage, the most valuable contributions are ideas: which feature from which tool can you not live without? Which design choices feel like friction? Please open an issue.
 
-## 许可证
+## License
 
 [MIT](LICENSE)
